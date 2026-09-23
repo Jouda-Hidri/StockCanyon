@@ -481,7 +481,41 @@ rate-limit or make idempotent.
 
 ---
 
-## 12. Deliberately not implemented
+## 12. Scaling boundary
+
+The service persists quotes synchronously while consuming the stream, so ingestion throughput is
+coupled to database write throughput. That is deliberate and it is simple, and it holds while the
+feed is slower than the database.
+
+It stops holding when either of two things is true, and both are numbers to measure rather than
+guess:
+
+- sustained exchange throughput exceeds what the database can commit, or
+- the database outage we must tolerate exceeds the exchange's replay retention.
+
+Until then, a bounded in-memory buffer is the wrong answer: at 100k quotes/s a quote costs roughly
+400 bytes, so buffering buys `size / 100k` seconds — about 1.2 GB to ride out thirty seconds, 24 GB
+for ten minutes. You cannot heap your way out of a slow database.
+
+What holds the data instead is the exchange. Stop consuming, let the connection fail, and reconnect
+from the checkpoint: the replay window *is* the buffer, and memory stays bounded. If the outage
+outlives that window the reconnect is refused with `CHECKPOINT_TOO_OLD` — a detected gap rather than
+a silent one, which is the point of refusing loudly.
+
+Past that boundary the next component is a durable log we own, and the checkpoint changes meaning
+with it: it would certify the last quote durably appended to the log, not the last committed to the
+database. Consumers updating the latest quote and the history then run independently behind it.
+Note the cost — appending to the log and advancing the exchange checkpoint are no longer one
+transaction, so that edge falls back to append-then-checkpoint plus idempotency.
+
+A cheaper step usually comes first: the two writes have opposite requirements and need not share a
+transaction. `latest_quote` is small, must be fresh, and coalescing already makes it scale with the
+number of instruments rather than the quote rate. `quote` history is enormous and nothing reads it
+synchronously. Splitting them often removes the problem without adding a system.
+
+---
+
+## 13. Deliberately not implemented
 
 Everything below is a real improvement that the brief does not ask for. Named rather than built, so
 the code stays the size of the problem:
@@ -509,7 +543,7 @@ consumer learns about it instead of inheriting an undetectable gap.
 
 ---
 
-## 13. How the guarantee is verified
+## 14. How the guarantee is verified
 
 `MarketDataRecoveryTest` runs against a real PostgreSQL (Testcontainers), severs the connection
 mid-stream, and asserts:
