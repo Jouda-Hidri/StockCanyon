@@ -1,0 +1,62 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.3.4'
+    id 'io.spring.dependency-management' version '1.1.6'
+}
+
+group = 'stockcanyon'
+version = '1.0.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+/*
+ * Spring Boot 3.3's BOM pins Testcontainers to 1.19.8, whose bundled docker-java speaks remote
+ * API v1.32. Docker Engine 29 refuses anything below v1.40, so on a current daemon that version
+ * answers 400 to every call and the recovery test cannot find a Docker environment at all.
+ * Overriding the managed property is the only thing that moves it — a version on the dependency
+ * itself is silently downgraded back to the BOM's.
+ */
+ext['testcontainers.version'] = '1.21.4'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // The API, and the WebSocket *server* the simulated exchange runs on. The WebSocket *client*
+    // deliberately adds nothing: it is the JDK's own HttpClient.
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-websocket'
+
+    // Storage. Plain JDBC rather than JPA: the write path needs a multi-row insert that ignores
+    // conflicts and a conditional upsert, both things an ORM gets in the way of.
+    implementation 'org.springframework.boot:spring-boot-starter-jdbc'
+    implementation 'org.flywaydb:flyway-core'
+    implementation 'org.flywaydb:flyway-database-postgresql'
+    runtimeOnly 'org.postgresql:postgresql'
+
+    // So consumption lag is observable from outside the process.
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+    // The recovery test runs against a real PostgreSQL, because the behaviour it proves is
+    // behaviour of the database: an upsert that refuses to move a quote backwards, and a
+    // transaction that commits data and checkpoint together. An in-memory stand-in would be
+    // verifying a different system.
+    testImplementation 'org.testcontainers:junit-jupiter'
+    testImplementation 'org.testcontainers:postgresql'
+    testImplementation 'org.awaitility:awaitility'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+    }
+}

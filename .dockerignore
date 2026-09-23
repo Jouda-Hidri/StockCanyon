@@ -1,0 +1,7 @@
+# Keep the build context small; the image rebuilds from source anyway.
+build/
+.gradle/
+bin/
+.git/
+.idea/
+*.iml

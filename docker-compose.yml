@@ -1,0 +1,77 @@
+# The market data service, its database, and a stand-in for the Stock Exchange.
+#
+#   docker compose up --build
+#
+# Three containers, two of them the same image. `exchange` publishes the feed and `marketdata`
+# consumes it, which keeps the consumer talking to something across a real network connection —
+# one that Compose can sever, so the recovery path can be demonstrated rather than described:
+#
+#   docker compose pause exchange && sleep 20 && docker compose unpause exchange
+#   curl -s localhost:8099/api/v1/marketdata/status | jq '.feed.quotesMissing'
+#
+# The answer must be 0. Everything the design does is in service of that.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: marketdata
+      POSTGRES_USER: marketdata
+      POSTGRES_PASSWORD: marketdata
+    volumes:
+      - marketdata-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # The consumer must not start migrating before the database accepts connections; without
+      # this it races the initdb and dies on the first attempt.
+      test: ["CMD-SHELL", "pg_isready -U marketdata -d marketdata"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    ports:
+      - "55432:5432"
+
+  # Plays the Stock Exchange: serves /exchange/quotes?checkpoint_timestamp= and publishes a
+  # Zipf-skewed quote stream. Consumes nothing and needs no database.
+  exchange:
+    build: .
+    environment:
+      SERVER_PORT: "8099"
+      MARKETDATA_ENABLED: "false"
+      MARKETDATA_SIMULATOR_ENABLED: "true"
+      MARKETDATA_SIMULATOR_QPS: "200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8099/actuator/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 60s
+    ports:
+      - "8098:8099"
+
+  # Consumes the feed, stores it, and serves the API.
+  marketdata:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      exchange:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: "8099"
+      MARKETDATA_ENABLED: "true"
+      MARKETDATA_EXCHANGE_URL: "ws://exchange:8099/exchange/quotes"
+      MARKETDATA_CONSUMPTION_ENABLED: "true"
+      MARKETDATA_DB_URL: "jdbc:postgresql://postgres:5432/marketdata"
+      MARKETDATA_DB_USER: "marketdata"
+      MARKETDATA_DB_PASSWORD: "marketdata"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8099/actuator/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 60s
+    ports:
+      - "8099:8099"
+
+volumes:
+  marketdata-pgdata:

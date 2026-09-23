@@ -1,0 +1,44 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # No PostgreSQL service is declared: the recovery test starts its own via Testcontainers,
+      # using the Docker daemon ubuntu-latest already provides. Testcontainers must stay at 1.21+
+      # (pinned in build.gradle) — the version Spring Boot's BOM manages speaks a Docker API that
+      # current daemons refuse.
+      - name: Test
+        run: ./gradlew test --no-daemon
+
+      - name: Upload test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            build/reports/tests/test
+            build/test-results/test
+          retention-days: 14
