@@ -28,9 +28,9 @@ design is arranged around.
 
     consumption/           FEATURE 1
       ExchangeWebSocketClient   connect, reconnect, backoff, stall detect, parse
-      QuoteBuffer               bounded hand-off + coalescing
+      QuoteBatch                coalescing + deduplication
       SequenceTracker           gap detection
-      QuoteConsumer             the transaction that ties data to checkpoint
+      QuoteConsumer             batches, and the transaction tying data to checkpoint
 
     storage/               FEATURE 2
       QuoteRepository           quote (history) + latest_quote (projection)
@@ -62,12 +62,10 @@ design is arranged around.
   |      . parse frame -> Quote                                     |
   |              |                                                  |
   |              v                                                  |
-  |    QuoteBuffer          bounded 50k -- blocks when full,        |
-  |         |               which is the backpressure               |
-  |         |  batch: every 200ms or 2000 quotes                    |
-  |         v                                                       |
   |    QuoteConsumer -------> SequenceTracker                       |
   |         |                   gap detection                       |
+  |         |  batches every 200ms or 2000 quotes, then writes      |
+  |         |  synchronously -- no queue, no writer thread          |
   +---------|------------------------------------------------------+
             |
             |  ONE TRANSACTION: quote + latest_quote + checkpoint
@@ -119,7 +117,7 @@ resume position travels **from the database back to the socket**:
 ```
  1  QuoteConsumer.start()
       |
-      +--> exchange.start(buffer::put, checkpoints::load)
+      +--> exchange.start(this, checkpoints::load)
                                         |
                                         +-- a SUPPLIER, not a value.
                                             Re-read on every attempt, so a
@@ -143,7 +141,7 @@ resume position travels **from the database back to the socket**:
       |
       +--> touch()                  reset the stall timer
       +--> partial.append(data)     frames can be fragmented
-      +--> handleFrame(...)         MAY BLOCK  <-- backpressure begins here
+      +--> handleFrame(...)         MAY BLOCK on the write below
       +--> webSocket.request(1)     ONLY NOW, after acceptance
 
  4  frame -> Quote
@@ -152,15 +150,14 @@ resume position travels **from the database back to the socket**:
       +-- "heartbeat" -> ignored; its only job is to make silence mean something
       +-- "error"     -> logged (CHECKPOINT_TOO_OLD / CONSUMER_TOO_SLOW)
 
- 5  into the pipeline
+ 5  accumulate                              QuoteConsumer.accept()
       |
-      +--> buffer.put(quote)        blocks when full -- by design
+      +--> pending.add(quote)
+      +--> flush when 2000 quotes or 200ms have passed
+           (a heartbeat also ticks this, so a quiet market still flushes)
 
- ----------------------------- thread boundary -----------------------------
-
- 6  writer thread                           QuoteConsumer.writeBatch()
+ 6  write                                   QuoteConsumer.flush()
       |
-      +--> buffer.drain(2000, 200ms)
       +--> dedupeByKey()            drop replayed rows sharing a primary key
       +--> coalesceLatest()         at most one quote per ISIN
       +--> highWaterMark()          newest by (event_time, sequence)
@@ -172,10 +169,10 @@ resume position travels **from the database back to the socket**:
       |    COMMIT
 ```
 
-The single most important ordering decision is in step 3: **`request(1)` comes after the quote is
-accepted**, not when the frame arrives. That one line is the backpressure mechanism — a saturated
-pipeline stops asking for frames, the TCP receive window closes, and the exchange is throttled
-instead of the service shedding data.
+The write is synchronous, on the socket's own thread. `request(1)` comes after the quote has been
+accepted, so while a batch is being written no further frames are requested and the exchange is
+simply not read. A queue and a writer thread would only have smoothed that — nothing the brief
+asks for — at the cost of a second thread, a shutdown drain and the bugs that come with both.
 
 ---
 
@@ -351,7 +348,7 @@ The brief notes one instrument may print X times a second while another prints Y
 zero. In the simulated feed the busiest instrument outpaces the quietest by roughly 100:1.
 
 ```
-   one flush -- 2000 quotes drained from the buffer
+   one flush -- 2000 accumulated quotes
    +-------------------------+
    |  AAPL  x 1400           |
    |  MSFT  x  480           |
@@ -373,21 +370,6 @@ unaffected either way, which is the property that matters: a busy neighbour must
 Coalescing is also a **correctness requirement**, not only an optimisation. PostgreSQL rejects an
 `ON CONFLICT DO UPDATE` that would touch one row twice in a single command, so an uncoalesced batch
 holding two quotes for the same ISIN fails the entire write.
-
-The buffer is bounded for a related reason:
-
-```
-   unbounded queue   ->  absorbs the backlog into the heap
-                     ->  process dies, losing the WHOLE buffer
-
-   bounded queue     ->  producer blocks
-                     ->  request(1) withheld
-                     ->  TCP receive window closes
-                     ->  the EXCHANGE slows down, nothing is lost
-```
-
-An unbounded queue does not remove the limit. It moves the failure from somewhere it can be handled
-to somewhere it cannot.
 
 ---
 
@@ -475,7 +457,6 @@ rate-limit or make idempotent.
 
 | Property | Default | Why |
 | --- | --- | --- |
-| `consumption.buffer-capacity` | 50 000 | Seconds of slack; short of hiding a database that has stopped |
 | `consumption.max-batch-size` | 2 000 | Bounds one transaction |
 | `consumption.flush-interval` | 200ms | Latency/throughput dial — bounds staleness, sets how much a commit amortises |
 | `consumption.stall-timeout` | 15s | Must exceed the heartbeat interval, or a quiet market reads as a dead socket |

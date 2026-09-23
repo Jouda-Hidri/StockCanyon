@@ -3,12 +3,9 @@ package stockcanyon.consumption;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.math.BigDecimal;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -16,7 +13,7 @@ import org.junit.jupiter.api.Test;
 import stockcanyon.Isin;
 import stockcanyon.Quote;
 
-class QuoteBufferTest {
+class QuoteBatchTest {
 
     private static final Isin AAPL = Isin.of("US0378331005");
     private static final Isin MSFT = Isin.of("US5949181045");
@@ -31,7 +28,7 @@ class QuoteBufferTest {
                 quote(MSFT, 3, T0.plusMillis(20), "200"),
                 quote(AAPL, 4, T0.plusMillis(30), "102"));
 
-        Collection<Quote> coalesced = QuoteBuffer.coalesceLatest(batch);
+        Collection<Quote> coalesced = QuoteBatch.coalesceLatest(batch);
 
         assertThat(coalesced).hasSize(2);
         assertThat(coalesced).extracting(q -> q.isin().value())
@@ -51,7 +48,7 @@ class QuoteBufferTest {
         }
         batch.add(quote(MSFT, 5_000, T0.plusSeconds(2), "200"));
 
-        Collection<Quote> coalesced = QuoteBuffer.coalesceLatest(batch);
+        Collection<Quote> coalesced = QuoteBatch.coalesceLatest(batch);
 
         assertThat(coalesced).hasSize(2);
         assertThat(batch).hasSize(1_001);
@@ -65,7 +62,7 @@ class QuoteBufferTest {
                 quote(AAPL, 10, T0.plusSeconds(5), "105"),
                 quote(AAPL, 4, T0.plusSeconds(1), "101"));
 
-        Collection<Quote> coalesced = QuoteBuffer.coalesceLatest(batch);
+        Collection<Quote> coalesced = QuoteBatch.coalesceLatest(batch);
 
         assertThat(coalesced).singleElement().extracting(Quote::sequence).isEqualTo(10L);
     }
@@ -76,7 +73,7 @@ class QuoteBufferTest {
         Quote original = quote(AAPL, 1, T0, "100");
         List<Quote> batch = List.of(original, quote(AAPL, 1, T0, "100"), quote(AAPL, 2, T0, "101"));
 
-        assertThat(QuoteBuffer.dedupeByKey(batch)).hasSize(2);
+        assertThat(QuoteBatch.dedupeByKey(batch)).hasSize(2);
     }
 
     @Test
@@ -84,53 +81,17 @@ class QuoteBufferTest {
     void dedupeIsAllocationFreeWhenNothingToDo() {
         List<Quote> batch = List.of(quote(AAPL, 1, T0, "100"), quote(MSFT, 2, T0, "200"));
 
-        assertThat(QuoteBuffer.dedupeByKey(batch)).isSameAs(batch);
+        assertThat(QuoteBatch.dedupeByKey(batch)).isSameAs(batch);
     }
 
     @Test
-    @DisplayName("draining waits for the first quote and then takes what is there")
-    void drainsUpToTheCap() throws Exception {
-        QuoteBuffer buffer = new QuoteBuffer(10);
-        buffer.put(quote(AAPL, 1, T0, "100"));
-        buffer.put(quote(MSFT, 2, T0, "200"));
+    @DisplayName("the high-water mark is the newest quote, not the last one delivered")
+    void highWaterMarkIsByEventTime() {
+        List<Quote> batch = List.of(
+                quote(AAPL, 10, T0.plusSeconds(5), "105"),
+                quote(MSFT, 11, T0.plusSeconds(1), "201"));
 
-        assertThat(buffer.drain(10, Duration.ofMillis(50))).hasSize(2);
-        assertThat(buffer.drain(10, Duration.ofMillis(10))).isEmpty();
-    }
-
-    /** Blocking is the only one of grow/drop/block that loses nothing. */
-    @Test
-    @DisplayName("a full buffer blocks the producer until space is freed")
-    void fullBufferBlocksTheProducer() throws Exception {
-        QuoteBuffer buffer = new QuoteBuffer(2);
-        buffer.put(quote(AAPL, 1, T0, "100"));
-        buffer.put(quote(AAPL, 2, T0.plusMillis(1), "101"));
-
-        CountDownLatch entered = new CountDownLatch(1);
-        CountDownLatch completed = new CountDownLatch(1);
-        Thread producer = new Thread(() -> {
-            entered.countDown();
-            try {
-                buffer.put(quote(AAPL, 3, T0.plusMillis(2), "102"));
-                completed.countDown();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        });
-        producer.start();
-
-        assertThat(entered.await(1, TimeUnit.SECONDS)).isTrue();
-        assertThat(completed.await(200, TimeUnit.MILLISECONDS))
-                .as("the producer must still be blocked on a full buffer")
-                .isFalse();
-
-        buffer.drain(1, Duration.ofMillis(10));
-
-        assertThat(completed.await(2, TimeUnit.SECONDS))
-                .as("the producer must proceed once space is freed")
-                .isTrue();
-        assertThat(buffer.blockedCount()).isEqualTo(1);
-        producer.join(TimeUnit.SECONDS.toMillis(2));
+        assertThat(QuoteBatch.highWaterMark(batch).sequence()).isEqualTo(10L);
     }
 
     private static Quote quote(Isin isin, long sequence, Instant eventTime, String price) {

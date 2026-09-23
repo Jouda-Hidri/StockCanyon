@@ -48,9 +48,13 @@ import stockcanyon.Quote;
  */
 public class ExchangeWebSocketClient {
 
-    /** Where consumed quotes go. May block — that is the backpressure. */
+    /** Where consumed quotes go. May block: the socket is not read while it does. */
     public interface QuoteSink {
-        void accept(Quote quote) throws InterruptedException;
+
+        void accept(Quote quote);
+
+        /** Called on a heartbeat, so a partial batch still gets written in a quiet market. */
+        void onIdle();
     }
 
     private static final Logger log = LoggerFactory.getLogger(ExchangeWebSocketClient.class);
@@ -219,7 +223,7 @@ public class ExchangeWebSocketClient {
 
     // ------------------------------------------------------------------ frames
 
-    private void handleFrame(String payload, QuoteSink sink) throws InterruptedException {
+    private void handleFrame(String payload, QuoteSink sink) {
         JsonNode node;
         try {
             node = mapper.readTree(payload);
@@ -229,8 +233,9 @@ public class ExchangeWebSocketClient {
         }
         switch (node.path("type").asText("quote")) {
             case "quote" -> sink.accept(toQuote(node));
-            // Heartbeats only reset the stall timer, already done by the transport layer.
-            case "heartbeat" -> { }
+            // The stall timer is already reset by the transport layer; the idle tick is what lets
+            // a partial batch be written when the market goes quiet.
+            case "heartbeat" -> sink.onIdle();
             case "error" -> log.error("Exchange reported {}: {}",
                     node.path("code").asText("UNKNOWN"), node.path("message").asText());
             default -> log.debug("Ignoring frame of unknown type: {}", truncate(payload));
@@ -280,10 +285,6 @@ public class ExchangeWebSocketClient {
                 partial.setLength(0);
                 try {
                     handleFrame(payload, sink);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    webSocket.abort();
-                    return null;
                 } catch (RuntimeException e) {
                     log.warn("Could not handle a frame: {}", e.toString());
                 }

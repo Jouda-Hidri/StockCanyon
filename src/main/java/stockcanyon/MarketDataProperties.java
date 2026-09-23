@@ -94,9 +94,6 @@ public class MarketDataProperties {
         /** Whether this instance consumes. Off on read replicas. */
         private boolean enabled = true;
 
-        /** Seconds of slack at a few hundred msg/s; short of hiding a database that has stopped. */
-        private int bufferCapacity = 50_000;
-
         /** Bounds one transaction. */
         private int maxBatchSize = 2_000;
 
@@ -122,13 +119,6 @@ public class MarketDataProperties {
             this.enabled = enabled;
         }
 
-        public int getBufferCapacity() {
-            return bufferCapacity;
-        }
-
-        public void setBufferCapacity(int bufferCapacity) {
-            this.bufferCapacity = bufferCapacity;
-        }
 
         public int getMaxBatchSize() {
             return maxBatchSize;

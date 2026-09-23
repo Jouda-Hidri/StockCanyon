@@ -84,7 +84,7 @@ public class QuoteRepository {
      *
      * <p>{@code quotes} must hold at most one entry per ISIN: PostgreSQL rejects an
      * {@code ON CONFLICT DO UPDATE} touching one row twice in a command. See
-     * {@code QuoteBuffer.coalesceLatest}.
+     * {@code QuoteBatch.coalesceLatest}.
      */
     public void upsertLatest(Collection<Quote> quotes, Instant updatedAt) {
         if (!quotes.isEmpty()) {

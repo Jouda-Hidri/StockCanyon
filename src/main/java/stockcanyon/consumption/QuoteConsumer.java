@@ -3,6 +3,7 @@ package stockcanyon.consumption;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
@@ -18,24 +19,24 @@ import stockcanyon.storage.CheckpointRepository;
 import stockcanyon.storage.QuoteRepository;
 
 /**
- * Drives consumption: socket to buffer to database.
+ * Drives consumption: socket to database.
  *
  * <p>Quotes, the latest-quote projection and the checkpoint are written <b>in one transaction</b>,
  * so there is no window between the data being durable and the position describing it being
  * durable. A crash after the commit resumes from a checkpoint that names exactly what survived.
  *
- * <p>The cost is replayed duplicates on every recovery, which the primary key discards. That is
- * the trade: a duplicate the database removes for free, rather than a gap nothing can rebuild.
+ * <p>The cost is replayed duplicates on every recovery, which the primary key discards. That is the
+ * trade: a duplicate the database removes for free, rather than a gap nothing can rebuild.
+ *
+ * <p>Quotes accumulate and are written in batches, on the socket's own thread. There is no queue
+ * and no writer thread: while a batch is being written the socket is simply not read, which is all
+ * a queue would have achieved anyway once full. It also means shutdown is just a final flush.
  */
-public class QuoteConsumer implements SmartLifecycle {
+public class QuoteConsumer implements SmartLifecycle, ExchangeWebSocketClient.QuoteSink {
 
     private static final Logger log = LoggerFactory.getLogger(QuoteConsumer.class);
 
-    /** How long shutdown waits for buffered quotes to be written. */
-    private static final Duration SHUTDOWN_DRAIN_TIMEOUT = Duration.ofSeconds(10);
-
     private final ExchangeWebSocketClient exchange;
-    private final QuoteBuffer buffer;
     private final QuoteRepository quotes;
     private final CheckpointRepository checkpoints;
     private final TransactionTemplate transactions;
@@ -44,6 +45,7 @@ public class QuoteConsumer implements SmartLifecycle {
     private final Duration flushInterval;
 
     private final SequenceTracker sequences = new SequenceTracker();
+    private final List<Quote> pending = new ArrayList<>();
     private final AtomicLong consumed = new AtomicLong();
     private final AtomicLong duplicates = new AtomicLong();
     private final AtomicLong missing = new AtomicLong();
@@ -51,11 +53,10 @@ public class QuoteConsumer implements SmartLifecycle {
     private volatile boolean running;
     private volatile Instant lastQuoteAt;
     private volatile Duration lastLag = Duration.ZERO;
-    private Thread writer;
+    private long lastFlushNanos = System.nanoTime();
 
     public QuoteConsumer(
             ExchangeWebSocketClient exchange,
-            QuoteBuffer buffer,
             QuoteRepository quotes,
             CheckpointRepository checkpoints,
             TransactionTemplate transactions,
@@ -63,7 +64,6 @@ public class QuoteConsumer implements SmartLifecycle {
             int maxBatchSize,
             Duration flushInterval) {
         this.exchange = exchange;
-        this.buffer = buffer;
         this.quotes = quotes;
         this.checkpoints = checkpoints;
         this.transactions = transactions;
@@ -80,15 +80,11 @@ public class QuoteConsumer implements SmartLifecycle {
             return;
         }
         running = true;
-        writer = new Thread(this::writeLoop, "marketdata-writer");
-        writer.start();
-
         // A supplier, not a value: re-read on every attempt, so a reconnect resumes from disk.
-        exchange.start(buffer::put, checkpoints::load);
+        exchange.start(this, checkpoints::load);
 
         Checkpoint from = checkpoints.load();
-        log.info("Market data consumption started (resume from {})",
-                from.isPresent() ? from.eventTime() : "now");
+        log.info("Consumption started (resume from {})", from.isPresent() ? from.eventTime() : "now");
     }
 
     @Override
@@ -96,24 +92,12 @@ public class QuoteConsumer implements SmartLifecycle {
         if (!running) {
             return;
         }
-        log.info("Stopping market data consumption");
-        // Socket first, so the buffer is not refilled while it drains.
-        exchange.stop();
         running = false;
-        if (writer != null) {
-            try {
-                // Not interrupted: the final flush needs a connection, and the pool refuses one to
-                // an interrupted thread. Interrupting first silently drops the buffer.
-                writer.join(SHUTDOWN_DRAIN_TIMEOUT.toMillis());
-                if (writer.isAlive()) {
-                    log.warn("Writer did not finish within {}; abandoning the buffered quotes",
-                            SHUTDOWN_DRAIN_TIMEOUT);
-                    writer.interrupt();
-                    writer.join(Duration.ofSeconds(2).toMillis());
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
+        exchange.stop();
+        try {
+            flush();
+        } catch (RuntimeException e) {
+            log.error("Could not flush on shutdown; these quotes will be replayed: {}", e.toString());
         }
         log.info("Consumption stopped after {} quote(s), {} duplicate(s), {} missing",
                 consumed.get(), duplicates.get(), missing.get());
@@ -130,50 +114,52 @@ public class QuoteConsumer implements SmartLifecycle {
         return Integer.MAX_VALUE - 100;
     }
 
-    // ------------------------------------------------------------------ writing
+    // ------------------------------------------------------------------ consuming
 
-    private void writeLoop() {
-        while (running) {
-            try {
-                List<Quote> batch = buffer.drain(maxBatchSize, flushInterval);
-                if (!batch.isEmpty()) {
-                    writeBatch(batch);
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            } catch (RuntimeException e) {
-                // The checkpoint did not advance, so the next reconnect replays this window.
-                log.error("Write failed; the checkpoint was not advanced so these quotes will be "
-                        + "replayed: {}", e.toString());
-                sleepQuietly(Duration.ofSeconds(1));
-            }
-        }
-        // Clear any interrupt: the pool will not serve an interrupted thread, and this flush is
-        // what saves the buffered quotes.
-        Thread.interrupted();
-        drainRemaining();
-    }
-
-    private void drainRemaining() {
-        try {
-            List<Quote> tail;
-            while (!(tail = buffer.drain(maxBatchSize, Duration.ZERO)).isEmpty()) {
-                writeBatch(tail);
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        } catch (RuntimeException e) {
-            log.error("Could not flush the remaining buffer on shutdown: {}", e.toString());
+    /**
+     * Accepts one quote from the socket, writing a batch when one is due.
+     *
+     * <p>Synchronized because a reconnect delivers on a new thread, and the batch must not be
+     * shared across the two.
+     */
+    @Override
+    public synchronized void accept(Quote quote) {
+        pending.add(quote);
+        boolean full = pending.size() >= maxBatchSize;
+        boolean due = System.nanoTime() - lastFlushNanos >= flushInterval.toNanos();
+        if (full || due) {
+            flush();
         }
     }
 
-    private void writeBatch(List<Quote> batch) {
+    /** A quiet market still flushes: the exchange's heartbeat drives this. */
+    @Override
+    public synchronized void onIdle() {
+        if (System.nanoTime() - lastFlushNanos >= flushInterval.toNanos()) {
+            flush();
+        }
+    }
+
+    /**
+     * Writes whatever has accumulated.
+     *
+     * <p>A failure here leaves the checkpoint where it was, so the next reconnect replays the same
+     * window and the quotes come back. The batch is dropped rather than retried in place, because
+     * retrying while the socket is blocked would stall consumption behind a database that is down.
+     */
+    private synchronized void flush() {
+        lastFlushNanos = System.nanoTime();
+        if (pending.isEmpty()) {
+            return;
+        }
+        List<Quote> batch = List.copyOf(pending);
+        pending.clear();
+
         inspectSequences(batch);
 
-        List<Quote> unique = QuoteBuffer.dedupeByKey(batch);
-        Collection<Quote> coalesced = QuoteBuffer.coalesceLatest(unique);
-        Quote highWater = highWaterMark(unique);
+        List<Quote> unique = QuoteBatch.dedupeByKey(batch);
+        Collection<Quote> coalesced = QuoteBatch.coalesceLatest(unique);
+        Quote highWater = QuoteBatch.highWaterMark(unique);
         Instant now = clock.instant();
 
         transactions.executeWithoutResult(status -> {
@@ -205,30 +191,6 @@ public class QuoteConsumer implements SmartLifecycle {
         }
     }
 
-    /**
-     * Newest quote in the batch — what the checkpoint must name.
-     *
-     * <p>Computed rather than taken as the last element, so a batch delivered slightly out of order
-     * cannot set the checkpoint from the wrong quote and skip the other on resume.
-     */
-    private static Quote highWaterMark(List<Quote> batch) {
-        Quote highest = batch.getFirst();
-        for (Quote quote : batch) {
-            if (quote.isNewerThan(highest)) {
-                highest = quote;
-            }
-        }
-        return highest;
-    }
-
-    private static void sleepQuietly(Duration duration) {
-        try {
-            Thread.sleep(duration.toMillis());
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
     // ------------------------------------------------------------------ status
 
     /**
@@ -241,7 +203,7 @@ public class QuoteConsumer implements SmartLifecycle {
             Instant lastQuoteAt,
             long lagMillis,
             Checkpoint checkpoint,
-            int bufferDepth,
+            int pendingQuotes,
             long quotesConsumed,
             long duplicatesDiscarded,
             long quotesMissing) {}
@@ -253,9 +215,13 @@ public class QuoteConsumer implements SmartLifecycle {
                 lastQuoteAt,
                 lastLag.toMillis(),
                 checkpoints.load(),
-                buffer.depth(),
+                pendingCount(),
                 consumed.get(),
                 duplicates.get(),
                 missing.get());
+    }
+
+    private synchronized int pendingCount() {
+        return pending.size();
     }
 }

@@ -95,7 +95,7 @@ class MarketDataRecoveryTest {
         await("the buffer to drain")
                 .atMost(Duration.ofSeconds(15))
                 .pollInterval(Duration.ofMillis(100))
-                .until(() -> consumer.status().bufferDepth() == 0);
+                .until(() -> consumer.status().pendingQuotes() == 0);
 
         QuoteConsumer.ConsumptionStatus status = consumer.status();
 
@@ -139,7 +139,7 @@ class MarketDataRecoveryTest {
                 .until(() -> consumer.status().quotesConsumed() > 2_000);
         await("the buffer to drain")
                 .atMost(Duration.ofSeconds(15))
-                .until(() -> consumer.status().bufferDepth() == 0);
+                .until(() -> consumer.status().pendingQuotes() == 0);
 
         Map<String, Long> after = latestSequencesByIsin();
 

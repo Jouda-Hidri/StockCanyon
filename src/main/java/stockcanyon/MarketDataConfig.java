@@ -20,7 +20,6 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import stockcanyon.consumption.ExchangeWebSocketClient;
-import stockcanyon.consumption.QuoteBuffer;
 import stockcanyon.consumption.QuoteConsumer;
 import stockcanyon.storage.CheckpointRepository;
 import stockcanyon.storage.QuoteRepository;
@@ -115,16 +114,8 @@ public class MarketDataConfig {
     @Bean
     @ConditionalOnProperty(prefix = "marketdata.consumption", name = "enabled",
             havingValue = "true", matchIfMissing = true)
-    public QuoteBuffer quoteBuffer(MarketDataProperties properties) {
-        return new QuoteBuffer(properties.getConsumption().getBufferCapacity());
-    }
-
-    @Bean
-    @ConditionalOnProperty(prefix = "marketdata.consumption", name = "enabled",
-            havingValue = "true", matchIfMissing = true)
     public QuoteConsumer quoteConsumer(
             ExchangeWebSocketClient exchangeWebSocketClient,
-            QuoteBuffer quoteBuffer,
             QuoteRepository quoteRepository,
             CheckpointRepository checkpointRepository,
             TransactionTemplate marketDataTransactionTemplate,
@@ -132,7 +123,6 @@ public class MarketDataConfig {
             MarketDataProperties properties) {
         return new QuoteConsumer(
                 exchangeWebSocketClient,
-                quoteBuffer,
                 quoteRepository,
                 checkpointRepository,
                 marketDataTransactionTemplate,
