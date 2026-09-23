@@ -18,29 +18,20 @@ import stockcanyon.storage.CheckpointRepository;
 import stockcanyon.storage.QuoteRepository;
 
 /**
- * Drives consumption: socket to buffer to database, and the checkpoint that ties them together.
+ * Drives consumption: socket to buffer to database.
  *
- * <p>The guarantee this class exists for is narrow and worth stating exactly. Quotes, the current
- * top of book, and the checkpoint are written <em>in one transaction</em>. Either the batch and the
- * position describing it are both durable, or neither is. Everything else follows:
+ * <p>Quotes, the latest-quote projection and the checkpoint are written <b>in one transaction</b>,
+ * so there is no window between the data being durable and the position describing it being
+ * durable. A crash after the commit resumes from a checkpoint that names exactly what survived.
  *
- * <ul>
- *   <li>Crash between writing quotes and saving the checkpoint: impossible, there is no between.
- *   <li>Crash after the commit: the checkpoint names exactly what survived, so the reconnect
- *       resumes from there and misses nothing.
- *   <li>Reconnect mid-stream: the exchange rewinds to the checkpoint's instant, which necessarily
- *       re-delivers quotes already stored, and the primary key discards them.
- * </ul>
- *
- * <p>The cost is duplicate work on every recovery, and that is deliberate. Committing the
- * checkpoint separately, or ahead of the data, would trade a duplicate the database removes for
- * free against a gap nothing can reconstruct.
+ * <p>The cost is replayed duplicates on every recovery, which the primary key discards. That is
+ * the trade: a duplicate the database removes for free, rather than a gap nothing can rebuild.
  */
 public class QuoteConsumer implements SmartLifecycle {
 
     private static final Logger log = LoggerFactory.getLogger(QuoteConsumer.class);
 
-    /** How long shutdown waits for buffered quotes to be written before giving up on them. */
+    /** How long shutdown waits for buffered quotes to be written. */
     private static final Duration SHUTDOWN_DRAIN_TIMEOUT = Duration.ofSeconds(10);
 
     private final ExchangeWebSocketClient exchange;
@@ -92,8 +83,7 @@ public class QuoteConsumer implements SmartLifecycle {
         writer = new Thread(this::writeLoop, "marketdata-writer");
         writer.start();
 
-        // A supplier, not a value: the checkpoint is re-read on every connection attempt, so a
-        // reconnect resumes from what is on disk now rather than from where this process began.
+        // A supplier, not a value: re-read on every attempt, so a reconnect resumes from disk.
         exchange.start(buffer::put, checkpoints::load);
 
         Checkpoint from = checkpoints.load();
@@ -107,16 +97,13 @@ public class QuoteConsumer implements SmartLifecycle {
             return;
         }
         log.info("Stopping market data consumption");
-        // Stop the socket first, so the buffer holds a fixed amount rather than being refilled
-        // while it is drained.
+        // Socket first, so the buffer is not refilled while it drains.
         exchange.stop();
         running = false;
         if (writer != null) {
             try {
-                // Deliberately not interrupted here. The loop notices `running` on its next poll
-                // and then flushes what is left — and that final flush needs a database
-                // connection, which the pool refuses to hand to a thread already carrying an
-                // interrupt. Interrupting first is how a clean shutdown silently drops a buffer.
+                // Not interrupted: the final flush needs a connection, and the pool refuses one to
+                // an interrupted thread. Interrupting first silently drops the buffer.
                 writer.join(SHUTDOWN_DRAIN_TIMEOUT.toMillis());
                 if (writer.isAlive()) {
                     log.warn("Writer did not finish within {}; abandoning the buffered quotes",
@@ -137,7 +124,7 @@ public class QuoteConsumer implements SmartLifecycle {
         return running;
     }
 
-    /** Started after the web server and stopped before it. */
+    /** Started after the web server, stopped before it. */
     @Override
     public int getPhase() {
         return Integer.MAX_VALUE - 100;
@@ -156,16 +143,14 @@ public class QuoteConsumer implements SmartLifecycle {
                 Thread.currentThread().interrupt();
                 break;
             } catch (RuntimeException e) {
-                // The batch is lost, but the checkpoint was not advanced past it, so the next
-                // reconnect replays the same window and the data comes back. Backing off avoids
-                // spinning against a database that is down.
+                // The checkpoint did not advance, so the next reconnect replays this window.
                 log.error("Write failed; the checkpoint was not advanced so these quotes will be "
                         + "replayed: {}", e.toString());
                 sleepQuietly(Duration.ofSeconds(1));
             }
         }
-        // Clear any pending interrupt before the last flush: the connection pool will not serve an
-        // interrupted thread, and this flush is what saves the buffered quotes.
+        // Clear any interrupt: the pool will not serve an interrupted thread, and this flush is
+        // what saves the buffered quotes.
         Thread.interrupted();
         drainRemaining();
     }
@@ -194,7 +179,7 @@ public class QuoteConsumer implements SmartLifecycle {
         transactions.executeWithoutResult(status -> {
             quotes.insertHistory(unique);
             quotes.upsertLatest(coalesced, now);
-            // Last, and in the same transaction: the position is only true once the data above is.
+            // Same transaction: the position is only true once the data above is.
             checkpoints.save(highWater.eventTime(), highWater.sequence(), now);
         });
 
@@ -203,13 +188,7 @@ public class QuoteConsumer implements SmartLifecycle {
         lastLag = highWater.ingestionLag();
     }
 
-    /**
-     * Watches the exchange's sequence for holes.
-     *
-     * <p>This is the only thing that can actually demonstrate the no-gaps requirement. A healthy
-     * socket, a successful reconnect and a climbing quote count are all perfectly consistent with
-     * having missed a thousand messages; a counter that goes 41, 42, 44 is not.
-     */
+    /** Counts duplicates and gaps. See {@link SequenceTracker}. */
     private void inspectSequences(List<Quote> batch) {
         for (Quote quote : batch) {
             SequenceTracker.Observation observation = sequences.observe(quote.sequence());
@@ -227,10 +206,10 @@ public class QuoteConsumer implements SmartLifecycle {
     }
 
     /**
-     * The newest quote in the batch, which is what the checkpoint must name.
+     * Newest quote in the batch — what the checkpoint must name.
      *
-     * <p>Computed rather than taken as the last element, so that a batch delivered slightly out of
-     * order cannot set the checkpoint from the wrong quote and skip the other on resume.
+     * <p>Computed rather than taken as the last element, so a batch delivered slightly out of order
+     * cannot set the checkpoint from the wrong quote and skip the other on resume.
      */
     private static Quote highWaterMark(List<Quote> batch) {
         Quote highest = batch.getFirst();
@@ -254,7 +233,7 @@ public class QuoteConsumer implements SmartLifecycle {
 
     /**
      * @param quotesMissing sequence numbers the exchange issued and this service never received.
-     *     The number that answers the requirement: anything but zero means the history has holes.
+     *     Anything but zero means the stored history has holes.
      */
     public record ConsumptionStatus(
             boolean running,

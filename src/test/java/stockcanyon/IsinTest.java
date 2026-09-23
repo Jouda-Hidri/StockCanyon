@@ -33,11 +33,7 @@ class IsinTest {
                 .hasMessageContaining("check digit");
     }
 
-    /**
-     * The failure the check digit exists to catch. Both of these are the right length, the right
-     * shape and the right character classes; only the check digit distinguishes them from the real
-     * identifier, which is exactly why validating the shape alone is not enough.
-     */
+    /** Right length, shape and character classes — only the check digit tells them apart. */
     @Test
     @DisplayName("rejects transposed characters that still look like an ISIN")
     void rejectsTransposition() {

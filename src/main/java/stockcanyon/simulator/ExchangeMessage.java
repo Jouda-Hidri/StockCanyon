@@ -7,12 +7,8 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 /**
- * The simulated exchange's wire format.
- *
- * <p>Separate from the domain {@code Quote} on purpose. This is a third party's message shape, and
- * letting the two be the same type would mean every change to the exchange's protocol silently
- * became a change to the service's internal model. It also has no notion of {@code receivedTime}:
- * the exchange cannot know when we saw it.
+ * The exchange's wire format, kept separate from the domain {@code Quote} so a protocol change
+ * does not silently become a model change.
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record ExchangeMessage(

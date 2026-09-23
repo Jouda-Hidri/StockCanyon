@@ -12,15 +12,13 @@ import stockcanyon.Checkpoint;
 /**
  * Persists how far the feed has been consumed.
  *
- * <p>Nothing here starts its own transaction, and that is the point: {@link #save} must commit
- * together with the quotes it describes, so the caller owns the transaction boundary and this
- * class only contributes a statement to it. A checkpoint that committed independently could
- * advance past quotes whose insert then rolled back — precisely the gap the design exists to
- * prevent.
+ * <p>Starts no transaction of its own: {@link #save} must commit with the quotes it describes, so
+ * the caller owns the boundary. A checkpoint committing independently could advance past quotes
+ * whose insert then rolled back.
  */
 public class CheckpointRepository {
 
-    /** One row, one feed. The constant keeps the schema honest about that. */
+    /** One row, one feed. */
     private static final String FEED = "exchange";
 
     private static final String UPSERT = """
@@ -56,9 +54,8 @@ public class CheckpointRepository {
     /**
      * Advances the checkpoint, never retreats it.
      *
-     * <p>A batch written out of order during replay would otherwise rewind the checkpoint and make
-     * the next reconnect replay ground already covered — not incorrect, but an unbounded amount of
-     * repeated work that grows the longer the service runs.
+     * <p>Otherwise an out-of-order batch would rewind it and make the next reconnect replay ground
+     * already covered — unbounded repeated work that grows the longer the service runs.
      */
     public void save(Instant eventTime, long sequence, Instant updatedAt) {
         jdbc.update(UPSERT, FEED, Timestamp.from(truncate(eventTime)), sequence,
@@ -66,17 +63,12 @@ public class CheckpointRepository {
     }
 
     /**
-     * Rounds the checkpoint down to the microsecond PostgreSQL can actually store.
+     * Rounds down to the microsecond PostgreSQL stores.
      *
-     * <p>{@code TIMESTAMPTZ} holds microseconds while {@code Instant} holds nanoseconds, so
-     * something has to give up the remainder — and which way decides whether this service can lose
-     * data. Rounding to nearest would sometimes land the checkpoint a few hundred nanoseconds
+     * <p>{@code Instant} holds nanoseconds. Rounding to nearest would sometimes land the checkpoint
      * <em>after</em> the quote it marks, and since the exchange resumes at the first message at or
-     * after the checkpoint, every quote in that sub-microsecond window would be skipped: a real
-     * gap, small, intermittent, and invisible to anything but the sequence check.
-     *
-     * <p>Truncating always moves the checkpoint earlier instead. The cost is at most one extra
-     * microsecond of replay, which deduplication absorbs.
+     * after it, everything in that sub-microsecond window would be skipped — a real gap, intermittent
+     * and invisible except to the sequence check. Truncating costs at most one microsecond of replay.
      */
     private static Instant truncate(Instant eventTime) {
         return eventTime.truncatedTo(ChronoUnit.MICROS);

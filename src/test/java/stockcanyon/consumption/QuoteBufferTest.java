@@ -41,10 +41,7 @@ class QuoteBufferTest {
                 .extracting(Quote::sequence).isEqualTo(4L);
     }
 
-    /**
-     * The behaviour that makes an uneven feed cheap. One instrument printing a thousand times
-     * while another prints once must cost two writes, not a thousand and one.
-     */
+    /** An uneven feed must cost two writes, not a thousand and one. */
     @Test
     @DisplayName("a hot instrument collapses to one write regardless of its tick rate")
     void hotInstrumentCollapses() {
@@ -60,11 +57,7 @@ class QuoteBufferTest {
         assertThat(batch).hasSize(1_001);
     }
 
-    /**
-     * Coalescing must be decided by event time, not by position in the batch. A quote replayed
-     * after a recovery arrives later but is older, and letting it win would move the top of book
-     * backwards.
-     */
+    /** Decided by event time, not batch position: a replayed quote arrives later but is older. */
     @Test
     @DisplayName("an out-of-order replay does not win the coalesce")
     void outOfOrderReplayLoses() {
@@ -105,11 +98,7 @@ class QuoteBufferTest {
         assertThat(buffer.drain(10, Duration.ofMillis(10))).isEmpty();
     }
 
-    /**
-     * The backpressure contract. A full buffer must block the producer rather than grow or drop:
-     * blocking is what eventually stops the socket being read and slows the exchange down, and it
-     * is the only one of the three options that loses nothing.
-     */
+    /** Blocking is the only one of grow/drop/block that loses nothing. */
     @Test
     @DisplayName("a full buffer blocks the producer until space is freed")
     void fullBufferBlocksTheProducer() throws Exception {

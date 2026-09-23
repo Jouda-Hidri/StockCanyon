@@ -15,19 +15,11 @@ import stockcanyon.Isin;
 import stockcanyon.Quote;
 
 /**
- * The hand-off between the socket and the database.
+ * Bounded hand-off between the socket and the writer thread.
  *
- * <p>It exists because the two sides have incompatible rhythms. Quotes arrive in bursts, dictated
- * by the market; the database is happiest with steady, batched writes. Writing each quote as it
- * lands would mean a round trip per message, and at a few hundred messages a second the commit
- * overhead alone becomes the bottleneck — with a burst on one instrument able to stall every other
- * instrument behind it.
- *
- * <p>The queue is bounded on purpose. An unbounded one does not remove the limit, it only moves the
- * failure from a place where it can be handled to a place where it cannot: the service absorbs the
- * backlog into the heap and eventually dies, losing the entire buffer rather than slowing down.
- * Bounded, a full queue blocks the feed's frame handler, which stops the socket being read, which
- * closes the TCP receive window and pushes the pressure back to the exchange where it belongs.
+ * <p>Bounded on purpose: when full, {@link #put} blocks, the socket stops being read, and the
+ * exchange is throttled. An unbounded queue would instead absorb the backlog until the process
+ * dies, losing everything in it.
  */
 public class QuoteBuffer {
 
@@ -40,13 +32,7 @@ public class QuoteBuffer {
         this.queue = new ArrayBlockingQueue<>(capacity);
     }
 
-    /**
-     * Enqueues a quote, blocking while the buffer is full.
-     *
-     * <p>Time spent blocked is measured rather than merely endured. It is the earliest honest
-     * signal that the pipeline cannot keep up with the feed, and it appears long before the lag
-     * shows up in the data.
-     */
+    /** Enqueues, blocking while full. Blocking time is measured: it is the first sign of lag. */
     public void put(Quote quote) throws InterruptedException {
         if (!queue.offer(quote)) {
             long start = System.nanoTime();
@@ -57,13 +43,7 @@ public class QuoteBuffer {
         accepted.incrementAndGet();
     }
 
-    /**
-     * Takes up to {@code max} quotes, waiting up to {@code timeout} for the first.
-     *
-     * <p>The wait is what keeps a quiet market from being written one row per transaction, and the
-     * cap is what keeps a busy one from building a batch so large that the transaction holding it
-     * becomes the problem.
-     */
+    /** Takes up to {@code max} quotes, waiting up to {@code timeout} for the first. */
     public List<Quote> drain(int max, Duration timeout) throws InterruptedException {
         Quote first = queue.poll(timeout.toMillis(), TimeUnit.MILLISECONDS);
         if (first == null) {
@@ -78,22 +58,9 @@ public class QuoteBuffer {
     /**
      * Reduces a batch to at most one quote per instrument, keeping the newest.
      *
-     * <p>This is what makes uneven arrival rates a non-issue. The assignment notes that one
-     * instrument may print X times in a second while another prints Y, and for a real feed the
-     * ratio is extreme — in the simulated exchange here the busiest instrument outpaces the
-     * quietest by roughly a hundred to one. Without coalescing, the cost of keeping the top of
-     * book current would scale with the noisiest instrument's tick rate; with it, a flush costs one
-     * write per instrument that moved, whether that instrument printed once or five thousand times.
-     * The quiet instrument is unaffected either way, which is the property that matters: a busy
-     * neighbour must not delay it.
-     *
-     * <p>It is also a correctness requirement, not only an optimisation. PostgreSQL refuses an
-     * {@code ON CONFLICT DO UPDATE} that would touch one row twice in a single command, so an
-     * uncoalesced batch containing two quotes for the same ISIN fails the whole write.
-     *
-     * <p>The history is untouched by this — every quote is still stored. Only the
-     * "what is it worth right now" projection is collapsed, and only onto quotes that a later one
-     * in the same batch already superseded.
+     * <p>Makes a flush cost one latest-quote write per instrument that moved, whether it moved once
+     * or 5000 times. Also required: PostgreSQL rejects an {@code ON CONFLICT DO UPDATE} touching one
+     * row twice in a command. History keeps every quote.
      */
     public static Collection<Quote> coalesceLatest(List<Quote> batch) {
         Map<Isin, Quote> newest = new LinkedHashMap<>();
@@ -105,12 +72,10 @@ public class QuoteBuffer {
     }
 
     /**
-     * Removes quotes that share a primary key within one batch.
+     * Drops quotes sharing a primary key within one batch.
      *
-     * <p>Needed because the PostgreSQL driver rewrites a batched insert into a single multi-row
-     * statement, at which point two identical keys in the same batch stop being separate
-     * statements that conflict harmlessly and become one statement conflicting with itself.
-     * Replay makes duplicates routine rather than exotic, so this runs on every flush.
+     * <p>The driver rewrites a batched insert into one multi-row statement, where duplicate keys
+     * collide with themselves instead of conflicting harmlessly. Replay makes that routine.
      */
     public static List<Quote> dedupeByKey(List<Quote> batch) {
         Map<String, Quote> unique = new LinkedHashMap<>(batch.size());
@@ -133,7 +98,6 @@ public class QuoteBuffer {
         return accepted.get();
     }
 
-    /** Total time the feed has spent waiting on a full buffer. */
     public Duration timeBlocked() {
         return Duration.ofNanos(blockedNanos.get());
     }

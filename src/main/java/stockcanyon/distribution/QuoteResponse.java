@@ -9,15 +9,10 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import stockcanyon.Quote;
 
 /**
- * What the API returns for a quote.
+ * API representation of a quote, kept separate from the stored model.
  *
- * <p>A response type distinct from the stored {@code Quote}, so the wire contract internal services
- * depend on does not change every time the internal model does.
- *
- * <p>{@code ageMillis} is included rather than left for the caller to compute. Every consumer of a
- * price needs to know how old it is, and making each of them subtract two timestamps invites each
- * to get the clock comparison subtly wrong — and to disagree with the others about whether a quote
- * is stale.
+ * <p>{@code ageMillis} is computed here so every caller does not subtract timestamps itself and
+ * disagree with the others about what counts as stale.
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record QuoteResponse(

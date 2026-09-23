@@ -10,17 +10,12 @@ import org.springframework.boot.autoconfigure.jdbc.JdbcTemplateAutoConfiguration
 import org.springframework.context.annotation.Bean;
 
 /**
- * Market Data Service.
+ * Consumes a price feed from a Stock Exchange over a WebSocket, stores it, and exposes the latest
+ * quote by ISIN. See {@code DESIGN.md}.
  *
- * <p>Consumes a price feed from a Stock Exchange over a WebSocket, stores it, and exposes the
- * latest quote by ISIN to other internal services. See {@code DESIGN.md} in this package.
- *
- * <p>Spring Boot's JDBC auto-configuration is excluded because this service configures its own
- * {@code DataSource}, Flyway run and transaction manager in {@link MarketDataConfig}. Left on, it
- * would define a second {@code JdbcTemplate} and a second transaction manager beside them, and
- * would fail the context outright whenever the module is disabled — HikariCP on the classpath is
- * enough for it to conclude the application wants a {@code DataSource}, and it then finds no
- * {@code spring.datasource.url} to build one from.
+ * <p>Spring Boot's JDBC auto-configuration is excluded because {@link MarketDataConfig} defines its
+ * own {@code DataSource}, Flyway run and transaction manager. Left on it would duplicate the last
+ * two, and would fail the context whenever the module is disabled.
  */
 @SpringBootApplication(exclude = {
         DataSourceAutoConfiguration.class,
@@ -33,13 +28,7 @@ public class StockcanyonApplication {
         SpringApplication.run(StockcanyonApplication.class, args);
     }
 
-    /**
-     * One clock for the whole service.
-     *
-     * <p>Injected rather than calling {@code Instant.now()} in place, because almost everything
-     * here is time-dependent — quote age, consumption lag, the checkpoint — and none of it is
-     * testable if the time source is a static method.
-     */
+    /** One clock, injected, so time-dependent behaviour is testable. */
     @Bean
     public Clock clock() {
         return Clock.systemUTC();

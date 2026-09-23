@@ -5,25 +5,15 @@ import java.time.Instant;
 /**
  * How far the feed has been consumed and durably stored.
  *
- * <p>This is the whole of the gap-free guarantee. The checkpoint is written in the same
- * transaction as the quotes it covers, so it can never point past data that is not on disk; on
- * resume the service asks the exchange to start again from here. The invariant to protect is
- * one-directional: a checkpoint that lags reality costs a replay, whereas a checkpoint that leads
- * it loses data silently. Every ambiguous case in this service is resolved toward the replay.
+ * <p>Written in the same transaction as the quotes it covers, so it can never point past data
+ * that is not on disk. A lagging checkpoint costs a replay; a leading one loses data silently.
  *
- * <p>{@code sequence} is carried alongside the timestamp even though the exchange's
- * {@code checkpoint_timestamp} parameter only accepts the latter. The exchange can only rewind to
- * an instant, and several quotes may share one instant, so the resumed stream necessarily
- * re-delivers some messages the service already holds. The sequence is what lets it recognise and
- * drop them.
- *
- * @param eventTime exchange timestamp of the last quote durably stored
- * @param sequence exchange sequence number of that quote
- * @param updatedAt when this service committed it, for operator visibility only
+ * <p>{@code sequence} is carried even though the exchange only accepts a timestamp: several quotes
+ * can share an instant, so resuming re-delivers some. The sequence is how they are recognised.
  */
 public record Checkpoint(Instant eventTime, long sequence, Instant updatedAt) {
 
-    /** The starting state: no checkpoint, so the feed subscribes from the current moment. */
+    /** Cold start: subscribe from the current moment. */
     public static Checkpoint none() {
         return new Checkpoint(null, -1, null);
     }
@@ -32,10 +22,7 @@ public record Checkpoint(Instant eventTime, long sequence, Instant updatedAt) {
         return eventTime != null;
     }
 
-    /**
-     * The value for the exchange's {@code checkpoint_timestamp} parameter, or null to subscribe
-     * from now.
-     */
+    /** Value for {@code checkpoint_timestamp}, or null to subscribe from now. */
     public String toQueryParameter() {
         return eventTime == null ? null : eventTime.toString();
     }

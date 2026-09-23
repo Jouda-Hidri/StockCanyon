@@ -4,26 +4,15 @@ import java.math.BigDecimal;
 import java.time.Instant;
 
 /**
- * One top-of-book observation for an instrument.
+ * One top-of-book observation.
  *
- * <p>Three timestamps look redundant and are not. {@code eventTime} is when the exchange says the
- * quote happened and is the only one that may be used to order quotes or to resume a feed.
- * {@code receivedTime} is when this service saw it, and the difference between the two is the
- * consumer lag that tells an operator whether the pipeline is keeping up. Conflating them hides
- * exactly the condition you most want to see.
+ * <p>{@code eventTime} is when the exchange says it happened and is the only field that may order
+ * quotes or resume a feed; {@code receivedTime} is when we saw it. The difference is consumption
+ * lag. {@code sequence} is the exchange's gap-free counter — what lets a consumer prove it missed
+ * nothing.
  *
- * <p>{@code sequence} is the exchange's own gap-free counter. It is what lets a consumer prove it
- * missed nothing rather than assume it: after a reconnect, a hole in the sequence is a hole in the
- * data, and no amount of successful reconnecting disproves it.
- *
- * <p>Prices are {@link BigDecimal} throughout. The reasoning is the same as {@code Money}'s in the
- * payments package — binary floating point cannot hold 0.10 — but market data cannot reuse
- * {@code Money}: a price is a rate rather than an amount, quoted to four or more decimal places
- * where the currency has two, so forcing it into minor units would round the tick away.
- *
- * <p>Sizes are {@link BigDecimal} rather than a count for the same reason. Equities trade in whole
- * shares, but the service also carries instruments that do not: a book quoting 1.40159 of
- * something is ordinary outside equities, and a {@code long} would silently floor it to 1.
+ * <p>Prices and sizes are {@link BigDecimal}: binary floating point cannot hold 0.10, and sizes
+ * are not always whole.
  */
 public record Quote(
         Isin isin,
@@ -49,12 +38,7 @@ public record Quote(
         currency = currency.toUpperCase();
     }
 
-    /**
-     * The midpoint, or whichever side is present when the book is one-sided.
-     *
-     * <p>Returning null for a one-sided book would push the special case onto every caller; a
-     * one-sided book is a normal state at the open and in thin names, not an error.
-     */
+    /** Midpoint, or whichever side is present. A one-sided book is normal, not an error. */
     public BigDecimal mid() {
         if (bid == null) {
             return ask;
@@ -65,17 +49,15 @@ public record Quote(
         return bid.add(ask).divide(BigDecimal.valueOf(2), java.math.RoundingMode.HALF_UP);
     }
 
-    /** How far behind the exchange this service was when it saw the quote. */
+    /** How far behind the exchange we were when we saw it. */
     public java.time.Duration ingestionLag() {
         return java.time.Duration.between(eventTime, receivedTime);
     }
 
     /**
-     * Whether this quote supersedes {@code other}.
+     * Whether this quote supersedes {@code other}: event time, with the sequence breaking ties.
      *
-     * <p>Event time decides, with the sequence breaking ties, because several quotes can share one
-     * instant. Used to keep a replayed or out-of-order message from overwriting a newer one — the
-     * same rule the {@code latest_quote} upsert enforces in SQL.
+     * <p>The same rule the {@code latest_quote} upsert enforces in SQL.
      */
     public boolean isNewerThan(Quote other) {
         if (other == null) {

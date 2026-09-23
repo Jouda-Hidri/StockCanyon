@@ -18,29 +18,18 @@ import stockcanyon.Isin;
 import stockcanyon.Quote;
 
 /**
- * Stores consumed quotes and reads the latest one back.
+ * Stores quotes and reads the latest one back.
  *
- * <p>Two tables rather than one, because the write path and the read path want opposite things.
- * Quotes arrive as an unbounded append-only stream; they are asked for almost entirely as "the
- * latest one for this ISIN". Serving that from the history would mean an {@code ORDER BY ... LIMIT
- * 1} over a table growing by millions of rows a day, so the current top of book is kept separately
- * as exactly one row per instrument.
+ * <p>Two tables: {@code quote} is the append-only history, {@code latest_quote} one row per
+ * instrument. Serving "latest" from the history would mean {@code ORDER BY ... LIMIT 1} over a
+ * table growing by millions of rows a day.
  *
- * <p>Plain JDBC rather than JPA. The two operations that matter here are ones an ORM gets in the
- * way of: a multi-row insert that ignores conflicts, and an upsert whose condition is evaluated by
- * the database. Expressing "write this row only if it is newer than the one already there" through
- * an entity manager means reading the row first, which is both slower and racy.
+ * <p>Plain JDBC, not JPA: the hot path needs a conflict-ignoring multi-row insert and a
+ * conditional upsert, both of which an ORM gets in the way of.
  */
 public class QuoteRepository {
 
-    /**
-     * The primary key is what makes consumption idempotent.
-     *
-     * <p>Recovery necessarily replays messages already stored, because the exchange can only rewind
-     * to a timestamp and several quotes can share one instant. Rather than trying to make delivery
-     * exactly-once — not achievable over a reconnecting socket — the write is made repeatable: a
-     * re-delivered quote conflicts on this key and is discarded.
-     */
+    /** The primary key is what makes consumption idempotent: a replayed quote conflicts and is dropped. */
     private static final String INSERT_HISTORY = """
             INSERT INTO quote (isin, event_time, sequence, bid, ask, bid_size, ask_size,
                                currency, received_time)
@@ -49,12 +38,11 @@ public class QuoteRepository {
             """;
 
     /**
-     * The guard in the WHERE clause is why a recovery cannot corrupt the read path.
+     * The WHERE guard is why a recovery cannot corrupt the read path.
      *
-     * <p>Replay re-delivers quotes out of order relative to what is already stored. Without this
-     * clause the last write would win, leaving the latest quote showing a price from several
-     * minutes ago with nothing to indicate it. Evaluating the comparison in SQL also makes it
-     * correct under concurrency: the row is locked by the upsert itself.
+     * <p>Replay delivers quotes out of order; without it, last-write-wins would leave the latest quote
+     * showing a price from minutes ago. In SQL rather than in Java so it is also correct under
+     * concurrency — the upsert locks the row.
      */
     private static final String UPSERT_LATEST = """
             INSERT INTO latest_quote (isin, event_time, sequence, bid, ask, bid_size, ask_size,
@@ -84,7 +72,7 @@ public class QuoteRepository {
         this.jdbc = jdbc;
     }
 
-    /** Appends a batch to the history, discarding anything already stored. */
+    /** Appends a batch, discarding anything already stored. */
     public void insertHistory(List<Quote> quotes) {
         if (!quotes.isEmpty()) {
             jdbc.batchUpdate(INSERT_HISTORY, new QuoteBatch(quotes, null));
@@ -94,10 +82,9 @@ public class QuoteRepository {
     /**
      * Moves each instrument's latest quote forward.
      *
-     * <p>{@code quotes} must hold at most one entry per ISIN. Not merely an efficiency preference:
-     * PostgreSQL rejects an {@code ON CONFLICT DO UPDATE} that would touch the same row twice in
-     * one command, so a batch containing two quotes for one instrument fails outright. Coalescing
-     * upstream is what prevents that — see {@code QuoteBuffer.coalesceLatest}.
+     * <p>{@code quotes} must hold at most one entry per ISIN: PostgreSQL rejects an
+     * {@code ON CONFLICT DO UPDATE} touching one row twice in a command. See
+     * {@code QuoteBuffer.coalesceLatest}.
      */
     public void upsertLatest(Collection<Quote> quotes, Instant updatedAt) {
         if (!quotes.isEmpty()) {
@@ -105,7 +92,7 @@ public class QuoteRepository {
         }
     }
 
-    /** The latest quote for an instrument — what the API exists to serve. */
+    /** The latest quote for an instrument — what the API serves. */
     public Optional<Quote> findLatest(Isin isin) {
         return jdbc.query("SELECT " + COLUMNS + " FROM latest_quote WHERE isin = ?",
                 MAPPER, isin.value()).stream().findFirst();

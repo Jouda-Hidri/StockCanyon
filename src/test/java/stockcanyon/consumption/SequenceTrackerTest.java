@@ -32,10 +32,7 @@ class SequenceTrackerTest {
         assertThat(observation.missingCount()).isEqualTo(4);
     }
 
-    /**
-     * Replay re-delivers messages already stored, because the exchange can only rewind to a
-     * timestamp. Those must not be mistaken for anything untoward.
-     */
+    /** Replay re-delivers stored messages; those are not gaps. */
     @Test
     @DisplayName("replayed messages are duplicates, not gaps")
     void replayIsNotAGap() {
@@ -49,10 +46,7 @@ class SequenceTrackerTest {
         assertThat(tracker.observe(13).verdict()).isEqualTo(Verdict.IN_ORDER);
     }
 
-    /**
-     * The high-water mark must not follow a duplicate backwards. If it did, the next genuine gap
-     * would be measured from the rewound position and reported as far larger than it was.
-     */
+    /** Otherwise the next real gap is measured from the rewound position and over-reported. */
     @Test
     @DisplayName("a duplicate does not rewind the high-water mark")
     void duplicateDoesNotRewind() {

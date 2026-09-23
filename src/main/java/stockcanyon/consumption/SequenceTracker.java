@@ -1,16 +1,12 @@
 package stockcanyon.consumption;
 
 /**
- * Watches a contiguous exchange sequence for holes.
+ * Detects holes in the exchange's sequence counter.
  *
- * <p>This is the only thing in the service that can actually prove the "no gaps" requirement. A
- * healthy socket, a successful reconnect and a rising quote count are all consistent with having
- * missed a thousand messages; a counter that goes 41, 42, 44 is not. Everything else in the
- * ingestion path is designed to prevent gaps — this is what detects the ones that happen anyway.
+ * <p>The only thing that can prove the no-gaps requirement: a healthy socket and a climbing quote
+ * count are both consistent with having missed a thousand messages; 41, 42, 44 is not.
  *
- * <p>Deliberately not thread-safe. It is driven only from the single flush thread, in arrival
- * order, and making it concurrent would invite it being called from somewhere that cannot
- * guarantee that order, at which point every result it produces is meaningless.
+ * <p>Not thread-safe by design — driven only from the writer thread, in arrival order.
  */
 public class SequenceTracker {
 

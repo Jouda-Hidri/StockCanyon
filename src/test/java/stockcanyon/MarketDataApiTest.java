@@ -23,11 +23,8 @@ import org.springframework.test.context.DynamicPropertySource;
 import stockcanyon.consumption.QuoteConsumer;
 
 /**
- * Covers data distribution: what other internal services actually call.
- *
- * <p>Driven over HTTP rather than against the controller directly, because most of what is checked
- * here only exists once a request has been through the whole stack — the status code for a
- * malformed identifier, and the ISIN parsed out of a path variable.
+ * Covers data distribution. Driven over HTTP, because what is checked — status codes, the ISIN
+ * parsed from a path variable — only exists once a request has been through the whole stack.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
 class MarketDataApiTest {

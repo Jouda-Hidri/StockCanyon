@@ -22,13 +22,8 @@ import stockcanyon.MarketDataProperties;
 /**
  * Publishes a synthetic quote stream into the {@link QuoteLog}.
  *
- * <p>Instrument selection is Zipf-weighted rather than uniform, which is what makes this a useful
- * stand-in rather than a toy. The requirements note that one instrument may print X times a second
- * while another prints Y, and a feed where every instrument ticks at the same rate exercises none
- * of the machinery that matters: a consumer that keeps up with an evenly spread feed can still fall
- * over on one where a single instrument carries most of the volume. At the default skew the busiest
- * name receives roughly a hundred times more quotes than the quietest, and the quietest goes whole
- * seconds without one.
+ * <p>Zipf-weighted rather than uniform, so arrival rates are genuinely lopsided — the busiest
+ * instrument gets ~100x the quietest. A uniform feed exercises none of the machinery that matters.
  */
 @Component
 @ConditionalOnProperty(prefix = "marketdata.simulator", name = "enabled", havingValue = "true")
@@ -39,7 +34,7 @@ public class SimulatedExchange {
 
     private record Instrument(String isin, BigDecimal openingPrice) {}
 
-    /** Real ISINs, so the payloads are realistic end to end. */
+    /** Real ISINs, so payloads are realistic end to end. */
     private static final List<Instrument> INSTRUMENTS = List.of(
             new Instrument("US0378331005", new BigDecimal("232.40")),   // Apple
             new Instrument("US5949181045", new BigDecimal("430.15")),   // Microsoft
@@ -105,7 +100,7 @@ public class SimulatedExchange {
         }
     }
 
-    /** Geometric random walk, so prices stay positive and move by a realistic proportion. */
+    /** Geometric random walk, so prices stay positive. */
     private BigDecimal nextPrice(int index) {
         double drift = ThreadLocalRandom.current().nextGaussian() * 0.0004;
         BigDecimal next = prices[index]
@@ -129,7 +124,7 @@ public class SimulatedExchange {
         return position >= 0 ? position : Math.min(-position - 1, cumulativeWeights.length - 1);
     }
 
-    /** Cumulative Zipf weights: the instrument at rank k gets weight proportional to 1/k^skew. */
+    /** Cumulative Zipf weights: rank k gets weight proportional to 1/k^skew. */
     private static double[] zipfWeights(int size, double skew) {
         double[] cumulative = new double[size];
         double running = 0;

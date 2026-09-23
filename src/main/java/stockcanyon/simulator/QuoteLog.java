@@ -12,15 +12,11 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
- * Bounded, append-only log of everything the simulated exchange has published, addressed by a
- * monotonic index. This is what makes {@code checkpoint_timestamp} replay possible.
+ * Bounded append-only log addressed by a monotonic index. What makes replay possible.
  *
- * <p>Replay and live streaming are the same operation: a reader holds a cursor and pulls forward,
- * and one that starts in the past simply has further to travel before it catches up. Modelling it
- * this way removes a race that the obvious "replay the backlog, then subscribe" design has —
- * quotes published between the end of the replay and the start of the subscription fall into the
- * seam between them, and the resulting gap appears only under load, which is the worst time to
- * discover it.
+ * <p>Replay and live streaming are the same operation — a reader holds a cursor and pulls forward.
+ * That removes the race in "replay the backlog, then subscribe", where quotes published between
+ * the two fall into the seam.
  */
 @Component
 @ConditionalOnProperty(prefix = "marketdata.simulator", name = "enabled", havingValue = "true")
@@ -70,8 +66,7 @@ public class QuoteLog {
     }
 
     /**
-     * Reads up to {@code max} messages from {@code cursor}, waiting up to {@code timeout} for the
-     * first to arrive.
+     * Reads up to {@code max} messages from {@code cursor}, waiting up to {@code timeout}.
      *
      * @throws EvictedException if {@code cursor} names data already overwritten
      */
@@ -101,14 +96,10 @@ public class QuoteLog {
     }
 
     /**
-     * Resolves a {@code checkpoint_timestamp} to a cursor: the first message stamped at or after
-     * it.
+     * Resolves a {@code checkpoint_timestamp} to a cursor: the first message at or after it.
      *
-     * <p>The boundary is inclusive, deliberately. A timestamp is not a unique address — several
-     * quotes can share one instant — so an exclusive boundary would drop every quote that happened
-     * to share the checkpoint's. Re-delivering them instead is harmless, because the consumer
-     * deduplicates on the primary key. Offered the choice between a gap and a duplicate, this
-     * contract always produces the duplicate.
+     * <p>Inclusive on purpose. Several quotes can share an instant, so an exclusive boundary would drop
+     * them all. The consumer deduplicates, so a duplicate is always preferred to a gap.
      *
      * @throws EvictedException if the checkpoint predates the retained window
      */
@@ -123,7 +114,7 @@ public class QuoteLog {
                                     .formatted(checkpoint, oldest.timestamp()));
                 }
             }
-            // Timestamps are assigned in append order, so the log is sorted and binary search applies.
+            // Assigned in append order, so the log is sorted.
             long low = baseIndex;
             long high = nextIndex;
             while (low < high) {

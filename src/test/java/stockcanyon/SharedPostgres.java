@@ -8,23 +8,15 @@ import java.sql.Statement;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 /**
- * One PostgreSQL container for the market data tests, with a separate database per test class.
+ * One PostgreSQL container, started once and never explicitly stopped, with a database per test
+ * class.
  *
- * <p>The usual {@code @Testcontainers} / {@code @Container} pair is deliberately not used, because
- * its teardown ordering is wrong for a service that writes on shutdown. The JUnit extension stops
- * the container when the test class finishes, whereas the Spring context — cached and shared
- * between test classes — is closed later, from a JVM shutdown hook. The ingestion service's final
- * flush therefore ran against a database that had already gone, blocked until the connection
- * timeout, and reported a failure that said nothing about the code under test.
+ * <p>{@code @Testcontainers} is not used: it stops the container when the class finishes, while the
+ * cached Spring context closes later from a shutdown hook — so the consumer's final flush ran
+ * against a database that had already gone. Leaving it running inverts that ordering.
  *
- * <p>Leaving the container running inverts that: the context closes first and drains cleanly, and
- * Testcontainers' own reaper removes the container once the JVM exits.
- *
- * <p>Each test class gets its own database rather than sharing one. Every class that enables the
- * module runs a full ingestion pipeline against its own simulated exchange, and two of those
- * writing to the same tables interleave two unrelated sequence streams — which makes the
- * contiguity check in {@code MarketDataRecoveryTest} fail for a reason that has nothing to do with
- * recovery. Isolating the schemas keeps each test measuring only its own feed.
+ * <p>Separate databases because two test classes each run a full pipeline against their own
+ * simulated exchange, and sharing tables interleaves two unrelated sequence streams.
  */
 final class SharedPostgres {
 

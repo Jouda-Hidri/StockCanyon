@@ -21,19 +21,13 @@ import stockcanyon.consumption.QuoteConsumer;
 import stockcanyon.simulator.SimulatedExchangeHandler;
 
 /**
- * Proves the requirement that the rest of the design is arranged around: consumption continues
- * across a network failure without losing a message.
+ * Proves consumption survives a network failure without losing a message.
  *
- * <p>The assertion that matters is not "it reconnected" — a service can reconnect flawlessly and
- * still have missed ten thousand quotes. It is that the exchange's sequence numbers stored in the
- * database form an unbroken run across the disconnect. A sequence is issued by the exchange and
- * increments by exactly one, so a hole in the stored set is proof of loss and the absence of one is
- * proof there was none. Everything else here is scaffolding for that single check.
+ * <p>The assertion is not "it reconnected" — that is consistent with having missed ten thousand
+ * quotes. It is that the stored sequences form an unbroken run across the disconnect.
  *
- * <p>Run against a real PostgreSQL rather than an in-memory substitute, because two of the three
- * things under test are behaviour of the database: the conditional upsert that refuses to move a
- * quote backwards, and the transaction that makes the quotes and the checkpoint describing them
- * durable together. A stand-in would be testing a different system.
+ * <p>Against a real PostgreSQL, because what is under test is largely the database's behaviour:
+ * the guarded upsert and the transaction that makes quotes and checkpoint durable together.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
 class MarketDataRecoveryTest {

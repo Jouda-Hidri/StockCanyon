@@ -31,36 +31,30 @@ import stockcanyon.Quote;
 /**
  * Consumes the Stock Exchange feed: {@code GET /quotes?checkpoint_timestamp=}.
  *
- * <p>This is the "fallback mechanism to ensure uninterrupted message consumption without gaps" the
- * requirements ask for. It has three parts, and the third is the one that is easy to miss.
+ * <p>The "fallback mechanism ... without gaps" the brief asks for, in three parts:
  *
  * <ol>
- *   <li><b>Resume from a checkpoint.</b> On every connection attempt the durable checkpoint is read
- *       and passed back to the exchange, which replays from that instant. Messages published while
- *       the socket was down are delivered rather than skipped.
- *   <li><b>Reconnect with backoff.</b> Exponential, with full jitter so that several instances
- *       losing the exchange at once do not retry in lockstep — synchronised bursts are what turn a
- *       brief exchange hiccup into a sustained one.
- *   <li><b>Detect a stalled socket.</b> A dropped route or a wedged peer produces no error and no
- *       close frame at all: TCP is perfectly satisfied and the connection simply never speaks
- *       again. Only a stall timer catches that, which is why the exchange sends heartbeats — they
- *       make silence mean something.
+ *   <li><b>Resume from a checkpoint.</b> Every attempt re-reads the durable checkpoint and passes
+ *       it back, so the exchange replays what was published while the socket was down.
+ *   <li><b>Reconnect with backoff.</b> Exponential with full jitter, so instances that fail
+ *       together do not retry in lockstep.
+ *   <li><b>Detect a stalled socket.</b> A wedged peer produces no error and no close frame — TCP
+ *       is satisfied and the connection simply never speaks again. Only a stall timer catches it,
+ *       which is why the exchange sends heartbeats.
  * </ol>
  *
- * <p>Reconnection is driven from one supervisor loop rather than from the socket callbacks. An
- * error and a close for the same failure each fire a callback, and acting on both opens two live
- * sockets — which stays invisible until it doubles every quote in the store.
+ * <p>Reconnection runs in one supervisor loop, not in the socket callbacks: an error and a close
+ * for the same failure each fire, and acting on both opens two live sockets.
  */
 public class ExchangeWebSocketClient {
 
-    /** Where consumed quotes go. Allowed to block; see {@link #handleFrame}. */
+    /** Where consumed quotes go. May block — that is the backpressure. */
     public interface QuoteSink {
         void accept(Quote quote) throws InterruptedException;
     }
 
     private static final Logger log = LoggerFactory.getLogger(ExchangeWebSocketClient.class);
 
-    /** How often the supervisor wakes to test for a stall while a connection is live. */
     private static final Duration STALL_CHECK_INTERVAL = Duration.ofSeconds(1);
 
     private final URI endpoint;
@@ -86,17 +80,15 @@ public class ExchangeWebSocketClient {
         this.settings = settings;
         this.http = HttpClient.newBuilder()
                 .connectTimeout(settings.getConnectTimeout())
-                // Virtual threads because the frame handler below blocks on purpose: that is what
-                // propagates backpressure to the exchange.
+                // Virtual threads: the frame handler blocks on purpose, to apply backpressure.
                 .executor(Executors.newVirtualThreadPerTaskExecutor())
                 .build();
     }
 
     /**
-     * Starts consuming and keeps consuming, reconnecting as needed, until {@link #stop()}.
+     * Consumes until {@link #stop()}, reconnecting as needed.
      *
-     * @param resumePoint consulted afresh on every connection attempt, so each reconnect resumes
-     *     from what is durably stored <em>now</em> rather than from where this process started
+     * @param resumePoint read on every attempt, so a reconnect resumes from what is stored now
      */
     public void start(QuoteSink sink, Supplier<Checkpoint> resumePoint) {
         if (!running.compareAndSet(false, true)) {
@@ -168,9 +160,8 @@ public class ExchangeWebSocketClient {
             if (!running.get()) {
                 break;
             }
-            // The backoff resets only after a connection has held for a while. Resetting on
-            // connect would make an exchange that accepts and immediately drops look like a fresh
-            // success every time, producing an unthrottled reconnect loop.
+            // Reset only after a connection has held: resetting on connect would make an exchange
+            // that accepts and immediately drops look like a fresh success every time.
             boolean wasStable = connectedAtNanos != 0
                     && System.nanoTime() - connectedAtNanos >= settings.getStableAfter().toNanos();
             consecutiveFailures = wasStable ? 1 : consecutiveFailures + 1;
@@ -182,7 +173,7 @@ public class ExchangeWebSocketClient {
         log.info("Exchange consumption stopped");
     }
 
-    /** Blocks until the socket fails, closes, or goes silent for longer than the stall timeout. */
+    /** Blocks until the socket fails, closes, or goes silent past the stall timeout. */
     private void awaitFailure(Session session, WebSocket ws) throws InterruptedException {
         while (running.get()) {
             if (session.closed.await(STALL_CHECK_INTERVAL.toMillis(), TimeUnit.MILLISECONDS)) {
@@ -199,7 +190,7 @@ public class ExchangeWebSocketClient {
         }
     }
 
-    /** Exponential backoff with full jitter. @return false if interrupted, meaning shutdown. */
+    /** Exponential backoff with full jitter. @return false if interrupted. */
     private boolean sleepBackoff(int consecutiveFailures) {
         long capMillis = Math.min(
                 settings.getMaxBackoff().toMillis(),
@@ -215,12 +206,7 @@ public class ExchangeWebSocketClient {
         }
     }
 
-    /**
-     * Builds the subscription URL.
-     *
-     * <p>The parameter is omitted entirely on a cold start, which the contract reads as
-     * "from now". Otherwise it names the instant to resume from.
-     */
+    /** Omits the parameter on a cold start, which the contract reads as "from now". */
     private URI uriFor(Checkpoint resumePoint) {
         String checkpoint = resumePoint.toQueryParameter();
         if (checkpoint == null) {
@@ -243,8 +229,7 @@ public class ExchangeWebSocketClient {
         }
         switch (node.path("type").asText("quote")) {
             case "quote" -> sink.accept(toQuote(node));
-            // Heartbeats carry no data. Their only job is to reset the stall timer, which the
-            // transport layer has already done by the time this runs.
+            // Heartbeats only reset the stall timer, already done by the transport layer.
             case "heartbeat" -> { }
             case "error" -> log.error("Exchange reported {}: {}",
                     node.path("code").asText("UNKNOWN"), node.path("message").asText());
@@ -269,12 +254,7 @@ public class ExchangeWebSocketClient {
         lastFrameNanos.set(System.nanoTime());
     }
 
-    /**
-     * One connection's worth of listener state.
-     *
-     * <p>A new instance per connection, so a frame arriving late from a socket already being torn
-     * down cannot be stitched onto the next connection's partial message.
-     */
+    /** One connection's listener state, so a late frame cannot join the next connection's message. */
     private final class Session implements WebSocket.Listener {
 
         private final CountDownLatch closed = new CountDownLatch(1);
@@ -308,9 +288,8 @@ public class ExchangeWebSocketClient {
                     log.warn("Could not handle a frame: {}", e.toString());
                 }
             }
-            // Requested only now, after the quote has been accepted downstream. While the pipeline
-            // is saturated no further frames are requested, the TCP receive window closes, and the
-            // exchange is slowed rather than this service silently shedding quotes.
+            // Only now, after the quote was accepted: while saturated we request nothing, the TCP
+            // window closes, and the exchange slows instead of this service shedding quotes.
             webSocket.request(1);
             return null;
         }

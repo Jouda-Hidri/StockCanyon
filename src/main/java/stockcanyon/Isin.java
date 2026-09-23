@@ -1,17 +1,11 @@
 package stockcanyon;
 
 /**
- * An International Securities Identification Number, validated on construction.
+ * An ISIN, validated on construction including the check digit.
  *
- * <p>The check digit is verified rather than merely the shape. An ISIN is the key the whole
- * service is addressed by, and the failure it guards against is specific: a transposed pair of
- * characters still matches {@code [A-Z]{2}[A-Z0-9]{9}[0-9]} and still looks like an identifier, but
- * it names a different instrument or no instrument at all. Caught at the edge it is a 400; not
- * caught, it becomes a silent miss on the read path, or worse, quotes filed against the wrong
- * security.
- *
- * <p>Modelled as a type rather than passed around as a {@code String} for the usual reason: a
- * method taking {@code (String isin, String currency)} accepts them in either order.
+ * <p>Shape alone is not enough: a transposed pair still matches {@code [A-Z]{2}[A-Z0-9]{9}[0-9]}
+ * but names a different instrument, or none. Caught here it is a 400; uncaught it is a silent
+ * miss, or quotes filed against the wrong security.
  */
 public record Isin(String value) implements Comparable<Isin> {
 
@@ -45,7 +39,7 @@ public record Isin(String value) implements Comparable<Isin> {
         return new Isin(value);
     }
 
-    /** Whether {@code value} is a well-formed ISIN, for the read path's input validation. */
+    /** Whether {@code value} is a well-formed ISIN. */
     public static boolean isValid(String value) {
         try {
             new Isin(value);
@@ -56,13 +50,11 @@ public record Isin(String value) implements Comparable<Isin> {
     }
 
     /**
-     * The ISO 6166 check digit for the first eleven characters.
+     * ISO 6166 check digit for the first eleven characters.
      *
-     * <p>Letters expand to two digits (A=10 … Z=35) and the resulting numeric string is run
-     * through Luhn, doubling every second digit counting from the right. Note that the expansion
-     * happens before the doubling, so a letter's two digits occupy two positions and can fall on
-     * opposite sides of the alternation — which is why this cannot be simplified into a single
-     * pass over the original characters.
+     * <p>Letters expand to two digits (A=10 ... Z=35), then Luhn over the result. The expansion
+     * happens first, so a letter occupies two positions and can straddle the alternation — which is
+     * why this cannot be done in one pass over the original characters.
      */
     static int checkDigit(String body) {
         StringBuilder digits = new StringBuilder(body.length() * 2);
@@ -90,7 +82,7 @@ public record Isin(String value) implements Comparable<Isin> {
         return (10 - (sum % 10)) % 10;
     }
 
-    /** The two-letter ISO 3166 prefix. Not always where the issuer is: {@code XS} is Euroclear. */
+    /** The ISO 3166 prefix. Not always the issuer's country: {@code XS} is Euroclear. */
     public String countryCode() {
         return value.substring(0, 2);
     }

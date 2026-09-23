@@ -21,12 +21,10 @@ import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 /**
- * Serves {@code /exchange/quotes?checkpoint_timestamp=}, the endpoint described in the
- * requirements.
+ * Serves {@code /exchange/quotes?checkpoint_timestamp=}.
  *
- * <p>An absent, blank or {@code null} checkpoint means "stream from now". Otherwise the value is an
- * ISO-8601 instant (or epoch milliseconds) and the stream opens with everything published at or
- * after it, then continues live with no seam between the two.
+ * <p>Absent or {@code null} means "from now". Otherwise the stream opens with everything published
+ * at or after that instant, then continues live with no seam.
  */
 @Component
 @ConditionalOnProperty(prefix = "marketdata.simulator", name = "enabled", havingValue = "true")
@@ -55,9 +53,7 @@ public class SimulatedExchangeHandler extends TextWebSocketHandler {
         try {
             cursor = raw == null ? quoteLog.tailCursor() : quoteLog.cursorAtOrAfter(parseCheckpoint(raw));
         } catch (QuoteLog.EvictedException e) {
-            // The consumer asked for data no longer held. Refusing loudly is the only honest
-            // answer: silently fast-forwarding to the live edge would hand them a gap they had no
-            // way of detecting, which is precisely the failure the checkpoint exists to prevent.
+            // Refuse loudly: fast-forwarding to the live edge would hand them an undetectable gap.
             refuse(session, "CHECKPOINT_TOO_OLD", e.getMessage());
             return;
         } catch (DateTimeParseException e) {
@@ -79,8 +75,7 @@ public class SimulatedExchangeHandler extends TextWebSocketHandler {
             while (session.isOpen() && !Thread.currentThread().isInterrupted()) {
                 QuoteLog.Batch batch = quoteLog.read(cursor, MAX_FRAMES_PER_READ, READ_WAIT);
                 if (batch.messages().isEmpty()) {
-                    // A quiet instant is not a dead socket. Saying so lets the consumer's stall
-                    // detector tell the two apart instead of reconnecting whenever a market is slow.
+                    // A quiet market is not a dead socket; this lets the stall detector tell them apart.
                     send(session, Map.of("type", "heartbeat", "timestamp", clock.instant().toString()));
                     continue;
                 }
@@ -125,18 +120,16 @@ public class SimulatedExchangeHandler extends TextWebSocketHandler {
     }
 
     /**
-     * Drops every live subscriber, simulating an exchange-side outage.
+     * Drops every subscriber, simulating an exchange-side outage.
      *
-     * <p>Fault injection, and the reason the simulator earns its place: a real exchange will not
-     * drop your connection on request, so without this the recovery path can only be asserted
-     * about, never demonstrated.
+     * <p>Fault injection: a real exchange will not do this on request, so without it the recovery path
+     * could only be asserted about, never demonstrated.
      */
     public int disconnectAll() {
         int dropped = 0;
         for (WebSocketSession session : List.copyOf(sessions.values())) {
             try {
-                // An abnormal status rather than a polite goodbye, so the consumer has to treat it
-                // as a failure and resume from its own checkpoint.
+                // Abnormal, not a polite goodbye, so the consumer must resume from its checkpoint.
                 session.close(CloseStatus.SERVICE_RESTARTED);
                 dropped++;
             } catch (Exception e) {

@@ -21,13 +21,13 @@ import stockcanyon.storage.QuoteRepository;
 /**
  * Exposes the consumed data to other internal services.
  *
- * <p>Read-only, and only two endpoints. Quotes enter this service from the exchange and from
- * nowhere else, so there is no write endpoint to secure, rate-limit or make idempotent.
+ * <p>Read-only: quotes enter from the exchange and nowhere else, so there is no write endpoint to
+ * secure or make idempotent.
  */
 @RestController
 @RequestMapping("/api/v1/marketdata")
-// Component scanning is not conditional, so without this the controller would be created even when
-// the module is switched off, then fail the context looking for beans that were never defined.
+// Scanning is not conditional, so without this the controller loads even when the module is off
+// and fails the context looking for beans that were never defined.
 @ConditionalOnProperty(prefix = "marketdata", name = "enabled", havingValue = "true")
 public class QuoteController {
 
@@ -45,14 +45,9 @@ public class QuoteController {
     /**
      * The latest quote for an instrument, by ISIN.
      *
-     * <p>Two distinct failures, two distinct codes. A malformed ISIN is the caller's bug and
-     * retrying will not help; an ISIN with no quote yet is a state that may resolve on its own.
-     * Collapsing both into one status leaves a client unable to tell "stop" from "try again
-     * shortly".
-     *
-     * <p>404 rather than an empty 200, because a caller that cannot distinguish "no price" from "a
-     * price of nothing" will eventually treat one as the other — and in a pricing path that is the
-     * expensive kind of mistake.
+     * <p>400 for a malformed ISIN, 404 for one with no quote: retrying helps only in the second case.
+     * 404 rather than an empty 200, because a caller that cannot tell "no price" from "a price of
+     * nothing" will eventually treat one as the other.
      */
     @GetMapping("/quotes/{isin}/latest")
     public QuoteResponse latest(@PathVariable String isin) {
@@ -67,14 +62,7 @@ public class QuoteController {
         return QuoteResponse.from(quote, Duration.between(quote.eventTime(), clock.instant()));
     }
 
-    /**
-     * Consumption state.
-     *
-     * <p>The field worth watching is {@code quotesMissing}: sequence numbers the exchange issued
-     * and this service never received. Anything but zero means the stored history has holes, and it
-     * is the only number here that says so — a healthy connection and a climbing quote count are
-     * both perfectly consistent with having missed a thousand messages.
-     */
+    /** Consumption state. {@code quotesMissing} is the field that answers the no-gaps requirement. */
     @GetMapping("/status")
     public Map<String, Object> status() {
         QuoteConsumer active = consumer.getIfAvailable();

@@ -26,16 +26,10 @@ import stockcanyon.storage.CheckpointRepository;
 import stockcanyon.storage.QuoteRepository;
 
 /**
- * Wires the three parts of the market data service: consumption, storage and distribution.
+ * Wires consumption, storage and distribution.
  *
- * <p>Everything here is conditional on {@code marketdata.enabled}. That matters more than a feature
- * flag normally would: this is the only part of Bankster that needs a database, and an
- * unconditional {@code DataSource} would mean every existing component — none of which has ever
- * persisted anything — could no longer start without a PostgreSQL to connect to.
- *
- * <p>The pool, the migrations and the transaction manager are this module's own rather than
- * application-wide, for the same reason: adding market data should not change how anything else
- * starts.
+ * <p>The pool, migrations and transaction manager are this module's own rather than
+ * application-wide, so the service owns its schema outright.
  */
 @Configuration
 @EnableConfigurationProperties(MarketDataProperties.class)
@@ -53,13 +47,12 @@ public class MarketDataConfig {
         config.setPassword(settings.getPassword());
         config.setMaximumPoolSize(settings.getMaxPoolSize());
         config.setPoolName("marketdata");
-        // Turns each batched insert into one multi-row statement. On the write path this is the
-        // difference between one round trip per quote and one per flush.
+        // One multi-row statement per batch: one round trip per flush, not per quote.
         config.addDataSourceProperty("reWriteBatchedInserts", "true");
         return new HikariDataSource(config);
     }
 
-    /** Migrates on start-up, before anything can query. Its own history table. */
+    /** Migrates on start-up, before anything can query. */
     @Bean
     public Flyway marketDataFlyway(DataSource marketDataDataSource) {
         Flyway flyway = Flyway.configure()
@@ -71,8 +64,7 @@ public class MarketDataConfig {
         return flyway;
     }
 
-    // Expressing the migration dependency on the template rather than on each repository means it
-    // cannot be forgotten when a repository is added.
+    // On the template, not each repository, so a new repository cannot forget it.
     @Bean
     @DependsOn("marketDataFlyway")
     public JdbcTemplate marketDataJdbcTemplate(DataSource marketDataDataSource) {
@@ -105,9 +97,8 @@ public class MarketDataConfig {
     /**
      * Only on the instance that consumes.
      *
-     * <p>Switched off on read replicas so exactly one process writes. Several writers would each
-     * keep their own checkpoint and replay each other's work — correct, thanks to the
-     * deduplicating key, but a multiple of the necessary write load.
+     * <p>Off on read replicas so exactly one process writes. Several writers would each keep their
+     * own checkpoint and replay each other's work — correct, but a multiple of the necessary load.
      */
     @Bean
     @ConditionalOnProperty(prefix = "marketdata.consumption", name = "enabled",
