@@ -245,7 +245,7 @@ be measured from the rewound position and reported as far larger than it was.
   t+10s  X  connection dies -- OR goes silent with no close frame at all
   t+25s  stall timer fires after 15s of silence
             ^ the only thing that catches a wedged-but-open socket
-  t+25s  backoff = random(0, min(30s, 500ms * 2^n))   <-- full jitter
+  t+25s  wait the fixed reconnect delay
   t+26s  read the checkpoint FRESH from Postgres  ->  eventTime=T, sequence=N
   t+26s  connect  ?checkpoint_timestamp=T
   t+26s  exchange replays from T, then continues live -- no seam
@@ -301,13 +301,11 @@ for free and a gap is one nothing can reconstruct. That appears in three places:
            they make silence mean something
 
   (c) peer accepts, then immediately drops
-        -> every attempt looks like a fresh success
-        -> backoff resets on SUSTAINED UPTIME (30s), not on connect
+        -> the fixed retry delay bounds the loop either way
 ```
 
-Backoff is exponential with **full jitter**. The jitter is not decoration: replicas that lose the
-exchange at the same moment otherwise retry in lockstep for the whole outage, and those synchronised
-bursts turn a brief exchange hiccup into a sustained one.
+Retries wait a fixed second, so a refusing exchange is not hammered in a tight loop. That is all the
+brief needs; see *Deliberately not implemented* below for when it stops being enough.
 
 Reconnection is driven from **one supervisor loop**, not from socket callbacks — an error and a close
 for the same failure each fire a callback, and acting on both opens two live sockets, which stays
@@ -460,27 +458,37 @@ rate-limit or make idempotent.
 | `consumption.max-batch-size` | 2 000 | Bounds one transaction |
 | `consumption.flush-interval` | 200ms | Latency/throughput dial — bounds staleness, sets how much a commit amortises |
 | `consumption.stall-timeout` | 15s | Must exceed the heartbeat interval, or a quiet market reads as a dead socket |
-| `consumption.stable-after` | 30s | Uptime before backoff resets |
+| `consumption.reconnect-delay` | 1s | Fixed wait between reconnect attempts |
 | `consumption.enabled` | true | Off on read replicas, so exactly one process writes |
 | `simulator.skew` | 1.1 | Zipf exponent — busiest instrument ~100x the quietest |
 
 ---
 
-## 12. Known limits
+## 12. Deliberately not implemented
 
-Named rather than half-built:
+Everything below is a real improvement that the brief does not ask for. Named rather than built, so
+the code stays the size of the problem:
 
-- **The writer is configured, not elected.** `consumption.enabled` decides who consumes. Several
-  writers would each keep their own checkpoint and replay each other's work — correct, thanks to the
-  deduplicating key, but a multiple of the necessary load. A PostgreSQL advisory lock on a dedicated
-  connection would elect one, and release it automatically when that process dies.
-- **`quote` is not partitioned.** By `event_time` it would be, turning retention into detaching a
-  partition rather than a `DELETE` that has to vacuum behind itself.
-- **Consumers poll.** A push channel (SSE, or publishing to Kafka alongside the database write) suits
-  consumers that want every tick rather than the current value.
-- **An outage longer than the replay window cannot be recovered.** The exchange retains a bounded log
-  and answers `CHECKPOINT_TOO_OLD` beyond it — refused loudly rather than silently fast-forwarded,
-  which would hand the consumer a gap it had no way to detect.
+- **A bounded queue and a writer thread.** Today a write stalls the socket for its duration. A
+  bounded `ArrayBlockingQueue` plus a writer thread would absorb arrival bursts. Bounded, not
+  unbounded: a full queue blocks the producer and pushes back on the exchange, whereas an unbounded
+  one absorbs the backlog into the heap until the process dies with all of it. Add it when writes
+  stop keeping up — it buys smoothing, not correctness.
+- **Exponential backoff with jitter.** The fixed delay is fine for one instance. Jitter starts to
+  matter when several instances lose the exchange at the same moment and retry in lockstep, turning
+  a brief hiccup into a sustained one.
+- **Electing the writer rather than configuring it.** `consumption.enabled` decides who consumes. A
+  PostgreSQL advisory lock on a dedicated connection would elect one and release it automatically
+  when that process dies — the standby then reads the checkpoint and continues, with the usual
+  overlap that deduplication already handles.
+- **Partitioning `quote` by `event_time`**, so retention is detaching a partition rather than a
+  `DELETE` that has to vacuum behind itself.
+- **A push channel** (SSE, or publishing alongside the database write) for consumers that want every
+  tick rather than the current value. They poll today.
+
+One limit that is not a choice: an outage longer than the exchange's replay window cannot be
+recovered. The exchange answers `CHECKPOINT_TOO_OLD` rather than silently fast-forwarding, so the
+consumer learns about it instead of inheriting an undetectable gap.
 
 ---
 

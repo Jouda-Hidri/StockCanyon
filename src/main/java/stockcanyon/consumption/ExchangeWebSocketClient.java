@@ -12,7 +12,6 @@ import java.time.Instant;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -84,7 +83,7 @@ public class ExchangeWebSocketClient {
         this.settings = settings;
         this.http = HttpClient.newBuilder()
                 .connectTimeout(settings.getConnectTimeout())
-                // Virtual threads: the frame handler blocks on purpose, to apply backpressure.
+                // Virtual threads: the frame handler blocks while it writes to the database.
                 .executor(Executors.newVirtualThreadPerTaskExecutor())
                 .build();
     }
@@ -129,9 +128,7 @@ public class ExchangeWebSocketClient {
     // ------------------------------------------------------------------ connection lifecycle
 
     private void supervise(QuoteSink sink, Supplier<Checkpoint> resumePoint) {
-        int consecutiveFailures = 0;
         while (running.get()) {
-            long connectedAtNanos = 0;
             try {
                 Checkpoint resume = resumePoint.get();
                 Session session = new Session(sink);
@@ -145,7 +142,6 @@ public class ExchangeWebSocketClient {
 
                 socket = ws;
                 connected = true;
-                connectedAtNanos = System.nanoTime();
                 touch();
 
                 awaitFailure(session, ws);
@@ -161,16 +157,7 @@ public class ExchangeWebSocketClient {
                 socket = null;
             }
 
-            if (!running.get()) {
-                break;
-            }
-            // Reset only after a connection has held: resetting on connect would make an exchange
-            // that accepts and immediately drops look like a fresh success every time.
-            boolean wasStable = connectedAtNanos != 0
-                    && System.nanoTime() - connectedAtNanos >= settings.getStableAfter().toNanos();
-            consecutiveFailures = wasStable ? 1 : consecutiveFailures + 1;
-
-            if (!sleepBackoff(consecutiveFailures)) {
+            if (!running.get() || !pauseBeforeRetry()) {
                 break;
             }
         }
@@ -194,15 +181,19 @@ public class ExchangeWebSocketClient {
         }
     }
 
-    /** Exponential backoff with full jitter. @return false if interrupted. */
-    private boolean sleepBackoff(int consecutiveFailures) {
-        long capMillis = Math.min(
-                settings.getMaxBackoff().toMillis(),
-                settings.getInitialBackoff().toMillis() * (1L << Math.min(consecutiveFailures - 1, 20)));
-        long delay = ThreadLocalRandom.current().nextLong(0, Math.max(1, capMillis) + 1);
-        log.info("Reconnecting to the exchange in {}ms (attempt {})", delay, consecutiveFailures + 1);
+    /**
+     * Waits before retrying, so a refusing exchange is not hammered in a tight loop.
+     *
+     * <p>A fixed delay. Exponential backoff with jitter would be the production upgrade — it
+     * matters once several instances can lose the exchange at the same moment and retry in
+     * lockstep — but it is not what makes consumption gap-free, so it is left out here.
+     *
+     * @return false if interrupted, meaning shutdown
+     */
+    private boolean pauseBeforeRetry() {
+        log.info("Reconnecting to the exchange in {}", settings.getReconnectDelay());
         try {
-            Thread.sleep(delay);
+            Thread.sleep(settings.getReconnectDelay().toMillis());
             return true;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

@@ -55,9 +55,8 @@ class MarketDataRecoveryTest {
 
         // Flush often, so the test does not spend most of its time waiting for a batch to fill.
         registry.add("marketdata.consumption.flush-interval", () -> "50ms");
-        // Reconnect promptly; the production default deliberately jitters up to half a second.
-        registry.add("marketdata.consumption.initial-backoff", () -> "50ms");
-        registry.add("marketdata.consumption.max-backoff", () -> "500ms");
+        // Reconnect promptly; the default is a second.
+        registry.add("marketdata.consumption.reconnect-delay", () -> "50ms");
     }
 
     @Autowired
@@ -86,13 +85,13 @@ class MarketDataRecoveryTest {
                 .isGreaterThan(0);
 
         // Enough new quotes that the stream is unambiguously live again rather than merely
-        // finishing what was already buffered when the socket died.
+        // finishing what was already pending when the socket died.
         await("the feed to recover and resume")
                 .atMost(Duration.ofSeconds(30))
                 .pollInterval(Duration.ofMillis(100))
                 .until(() -> consumer.status().quotesConsumed() > consumedBefore + 1_000);
 
-        await("the buffer to drain")
+        await("the pending batch to be written")
                 .atMost(Duration.ofSeconds(15))
                 .pollInterval(Duration.ofMillis(100))
                 .until(() -> consumer.status().pendingQuotes() == 0);
@@ -137,7 +136,7 @@ class MarketDataRecoveryTest {
                 .atMost(Duration.ofSeconds(30))
                 .pollInterval(Duration.ofMillis(100))
                 .until(() -> consumer.status().quotesConsumed() > 2_000);
-        await("the buffer to drain")
+        await("the pending batch to be written")
                 .atMost(Duration.ofSeconds(15))
                 .until(() -> consumer.status().pendingQuotes() == 0);
 

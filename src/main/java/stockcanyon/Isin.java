@@ -82,10 +82,6 @@ public record Isin(String value) implements Comparable<Isin> {
         return (10 - (sum % 10)) % 10;
     }
 
-    /** The ISO 3166 prefix. Not always the issuer's country: {@code XS} is Euroclear. */
-    public String countryCode() {
-        return value.substring(0, 2);
-    }
 
     @Override
     public int compareTo(Isin other) {

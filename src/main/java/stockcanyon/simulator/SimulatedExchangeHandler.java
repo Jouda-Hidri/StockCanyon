@@ -139,9 +139,6 @@ public class SimulatedExchangeHandler extends TextWebSocketHandler {
         return dropped;
     }
 
-    public int liveSessions() {
-        return sessions.size();
-    }
 
     private static String checkpointParameter(WebSocketSession session) {
         var uri = session.getUri();

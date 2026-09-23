@@ -28,9 +28,17 @@ import stockcanyon.storage.QuoteRepository;
  * <p>The cost is replayed duplicates on every recovery, which the primary key discards. That is the
  * trade: a duplicate the database removes for free, rather than a gap nothing can rebuild.
  *
- * <p>Quotes accumulate and are written in batches, on the socket's own thread. There is no queue
- * and no writer thread: while a batch is being written the socket is simply not read, which is all
- * a queue would have achieved anyway once full. It also means shutdown is just a final flush.
+ * <p>Quotes accumulate and are written in batches, on the socket's own thread. While a batch is
+ * being written the socket is simply not read, which throttles the exchange at the transport layer.
+ * Shutdown is therefore just a final flush.
+ *
+ * <p>TODO (not required here): decouple with a bounded queue and a writer thread, so arrival bursts
+ * are absorbed rather than stalling the socket for the duration of each write. {@code accept} would
+ * {@code put} onto an {@code ArrayBlockingQueue} and a writer thread would {@code drain} it into
+ * this same {@code flush}. The queue must be bounded — a full one blocks the producer, which stops
+ * the socket being read and pushes back on the exchange, whereas an unbounded one absorbs the
+ * backlog into the heap until the process dies and loses all of it. Worth doing when a write can no
+ * longer keep up with arrivals; measure before adding it, since it buys smoothing, not correctness.
  */
 public class QuoteConsumer implements SmartLifecycle, ExchangeWebSocketClient.QuoteSink {
 
@@ -148,8 +156,8 @@ public class QuoteConsumer implements SmartLifecycle, ExchangeWebSocketClient.Qu
      * retrying while the socket is blocked would stall consumption behind a database that is down.
      */
     private synchronized void flush() {
-        lastFlushNanos = System.nanoTime();
         if (pending.isEmpty()) {
+            lastFlushNanos = System.nanoTime();
             return;
         }
         List<Quote> batch = List.copyOf(pending);
@@ -172,6 +180,10 @@ public class QuoteConsumer implements SmartLifecycle, ExchangeWebSocketClient.Qu
         consumed.addAndGet(unique.size());
         lastQuoteAt = highWater.eventTime();
         lastLag = highWater.ingestionLag();
+        // Timed from the end of the write, not the start. Measured from the start, a write slower
+        // than the flush interval leaves every subsequent quote already overdue, so each one
+        // flushes a batch of itself — which makes writes slower still.
+        lastFlushNanos = System.nanoTime();
     }
 
     /** Counts duplicates and gaps. See {@link SequenceTracker}. */

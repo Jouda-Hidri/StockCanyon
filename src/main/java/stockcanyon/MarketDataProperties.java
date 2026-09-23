@@ -100,14 +100,12 @@ public class MarketDataProperties {
         /** Latency vs throughput: bounds staleness, and how much one commit amortises. */
         private Duration flushInterval = Duration.ofMillis(200);
 
-        private Duration initialBackoff = Duration.ofMillis(500);
-        private Duration maxBackoff = Duration.ofSeconds(30);
+        /** Fixed wait between reconnect attempts, so a refusing exchange is not hammered. */
+        private Duration reconnectDelay = Duration.ofSeconds(1);
 
         /** Must exceed the heartbeat interval, or a quiet market reads as a dead socket. */
         private Duration stallTimeout = Duration.ofSeconds(15);
 
-        /** Uptime before the backoff resets, so a flapping exchange is still throttled. */
-        private Duration stableAfter = Duration.ofSeconds(30);
 
         private Duration connectTimeout = Duration.ofSeconds(10);
 
@@ -136,21 +134,7 @@ public class MarketDataProperties {
             this.flushInterval = flushInterval;
         }
 
-        public Duration getInitialBackoff() {
-            return initialBackoff;
-        }
 
-        public void setInitialBackoff(Duration initialBackoff) {
-            this.initialBackoff = initialBackoff;
-        }
-
-        public Duration getMaxBackoff() {
-            return maxBackoff;
-        }
-
-        public void setMaxBackoff(Duration maxBackoff) {
-            this.maxBackoff = maxBackoff;
-        }
 
         public Duration getStallTimeout() {
             return stallTimeout;
@@ -160,12 +144,13 @@ public class MarketDataProperties {
             this.stallTimeout = stallTimeout;
         }
 
-        public Duration getStableAfter() {
-            return stableAfter;
+
+        public Duration getReconnectDelay() {
+            return reconnectDelay;
         }
 
-        public void setStableAfter(Duration stableAfter) {
-            this.stableAfter = stableAfter;
+        public void setReconnectDelay(Duration reconnectDelay) {
+            this.reconnectDelay = reconnectDelay;
         }
 
         public Duration getConnectTimeout() {
