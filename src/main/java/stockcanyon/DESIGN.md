@@ -518,7 +518,12 @@ synchronously. Splitting them often removes the problem without adding a system.
 ## 13. Deliberately not implemented
 
 Everything below is a real improvement that the brief does not ask for. Named rather than built, so
-the code stays the size of the problem:
+the code stays the size of the problem. Note what is already provided and therefore not written
+here: the WebSocket protocol and its automatic Pong replies (JDK), transactions and the atomic
+upsert (PostgreSQL), connection pooling (Hikari), migrations (Flyway), restart and health probes
+(Kubernetes, actuator). What is left to implement is the part specific to this problem — where the
+transaction boundary goes, what the upsert predicate says, and what the service does when it is no
+longer the leader.
 
 - **A bounded queue and a writer thread.** Today a write stalls the socket for its duration. A
   bounded `ArrayBlockingQueue` plus a writer thread would absorb arrival bursts. Bounded, not
@@ -528,10 +533,23 @@ the code stays the size of the problem:
 - **Exponential backoff with jitter.** The fixed delay is fine for one instance. Jitter starts to
   matter when several instances lose the exchange at the same moment and retry in lockstep, turning
   a brief hiccup into a sustained one.
-- **Electing the writer rather than configuring it.** `consumption.enabled` decides who consumes. A
-  PostgreSQL advisory lock on a dedicated connection would elect one and release it automatically
-  when that process dies — the standby then reads the checkpoint and continues, with the usual
-  overlap that deduplication already handles.
+- **Electing the writer rather than configuring it.** One process consumes today because it is the
+  only one deployed. Election itself is provided — a Kubernetes `Lease`, etcd, Consul, or Spring
+  Integration's `LockRegistry` — so the part to write is not the algorithm but what the service does
+  with it, and that part is easy to get wrong. A boolean "am I leader?" check is not enough: the
+  holder can pass the check, pause for thirty seconds, and write after a new leader took over. The
+  rejection has to happen at the database, via a **fencing token** — a monotonically increasing term
+  from the election primitive (etcd's revision, ZooKeeper's zxid, or a column incremented under a
+  row lock), carried on every write and refused if lower than the one already stored, in the same
+  transaction as the data.
+
+  Worth noting that split-brain would be benign here for correctness, because every write is
+  idempotent and ordered: history deduplicates on the primary key, `latest_quote` is a max-register,
+  and the checkpoint has its own monotonic guard. Fencing would buy resource protection and safety
+  for any future sink that is *not* commutative — publishing to a topic, notifying a service.
+  `pg_try_advisory_lock` is the tempting shortcut and the wrong one: it is session-scoped, so it
+  releases exactly when the holder is partitioned and still believes it holds it, and it carries no
+  term to fence with.
 - **Partitioning `quote` by `event_time`**, so retention is detaching a partition rather than a
   `DELETE` that has to vacuum behind itself.
 - **A push channel** (SSE, or publishing alongside the database write) for consumers that want every

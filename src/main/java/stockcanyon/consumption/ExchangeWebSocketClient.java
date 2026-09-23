@@ -282,21 +282,6 @@ public class ExchangeWebSocketClient {
         }
 
         @Override
-        public CompletionStage<?> onPing(WebSocket webSocket, java.nio.ByteBuffer message) {
-            touch();
-            webSocket.sendPong(message);
-            webSocket.request(1);
-            return null;
-        }
-
-        @Override
-        public CompletionStage<?> onPong(WebSocket webSocket, java.nio.ByteBuffer message) {
-            touch();
-            webSocket.request(1);
-            return null;
-        }
-
-        @Override
         public CompletionStage<?> onClose(WebSocket webSocket, int statusCode, String text) {
             reason = "closed " + statusCode + (text == null || text.isBlank() ? "" : " " + text);
             closed.countDown();
