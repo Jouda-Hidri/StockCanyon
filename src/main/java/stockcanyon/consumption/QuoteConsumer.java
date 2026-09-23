@@ -14,6 +14,7 @@ import org.springframework.context.SmartLifecycle;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import stockcanyon.Checkpoint;
+import stockcanyon.MarketDataProperties;
 import stockcanyon.Quote;
 import stockcanyon.storage.CheckpointRepository;
 import stockcanyon.storage.QuoteRepository;
@@ -40,7 +41,7 @@ import stockcanyon.storage.QuoteRepository;
  * backlog into the heap until the process dies and loses all of it. Worth doing when a write can no
  * longer keep up with arrivals; measure before adding it, since it buys smoothing, not correctness.
  */
-public class QuoteConsumer implements SmartLifecycle, ExchangeWebSocketClient.QuoteSink {
+public class QuoteConsumer implements SmartLifecycle {
 
     private static final Logger log = LoggerFactory.getLogger(QuoteConsumer.class);
 
@@ -69,15 +70,14 @@ public class QuoteConsumer implements SmartLifecycle, ExchangeWebSocketClient.Qu
             CheckpointRepository checkpoints,
             TransactionTemplate transactions,
             Clock clock,
-            int maxBatchSize,
-            Duration flushInterval) {
+            MarketDataProperties.Consumption settings) {
         this.exchange = exchange;
         this.quotes = quotes;
         this.checkpoints = checkpoints;
         this.transactions = transactions;
         this.clock = clock;
-        this.maxBatchSize = maxBatchSize;
-        this.flushInterval = flushInterval;
+        this.maxBatchSize = settings.maxBatchSize();
+        this.flushInterval = settings.flushInterval();
     }
 
     // ------------------------------------------------------------------ lifecycle
@@ -89,7 +89,7 @@ public class QuoteConsumer implements SmartLifecycle, ExchangeWebSocketClient.Qu
         }
         running = true;
         // A supplier, not a value: re-read on every attempt, so a reconnect resumes from disk.
-        exchange.start(this, checkpoints::load);
+        exchange.start(this::accept, this::onIdle, checkpoints::load);
 
         Checkpoint from = checkpoints.load();
         log.info("Consumption started (resume from {})", from.isPresent() ? from.eventTime() : "now");
@@ -124,14 +124,8 @@ public class QuoteConsumer implements SmartLifecycle, ExchangeWebSocketClient.Qu
 
     // ------------------------------------------------------------------ consuming
 
-    /**
-     * Accepts one quote from the socket, writing a batch when one is due.
-     *
-     * <p>Synchronized because a reconnect delivers on a new thread, and the batch must not be
-     * shared across the two.
-     */
-    @Override
-    public synchronized void accept(Quote quote) {
+    /** Synchronized because a reconnect delivers on a new thread. */
+    private synchronized void accept(Quote quote) {
         pending.add(quote);
         boolean full = pending.size() >= maxBatchSize;
         boolean due = System.nanoTime() - lastFlushNanos >= flushInterval.toNanos();
@@ -140,9 +134,8 @@ public class QuoteConsumer implements SmartLifecycle, ExchangeWebSocketClient.Qu
         }
     }
 
-    /** A quiet market still flushes: the exchange's heartbeat drives this. */
-    @Override
-    public synchronized void onIdle() {
+    /** Heartbeat tick, so a partial batch is still written when the market goes quiet. */
+    private synchronized void onIdle() {
         if (System.nanoTime() - lastFlushNanos >= flushInterval.toNanos()) {
             flush();
         }

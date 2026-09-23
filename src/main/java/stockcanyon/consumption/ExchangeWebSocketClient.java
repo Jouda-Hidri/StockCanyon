@@ -15,6 +15,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -28,42 +29,32 @@ import stockcanyon.MarketDataProperties;
 import stockcanyon.Quote;
 
 /**
- * Consumes the Stock Exchange feed: {@code GET /quotes?checkpoint_timestamp=}.
- *
- * <p>The "fallback mechanism ... without gaps" the brief asks for, in three parts:
+ * Consumes {@code GET /quotes?checkpoint_timestamp=}. The brief's fallback mechanism, in three
+ * parts:
  *
  * <ol>
- *   <li><b>Resume from a checkpoint.</b> Every attempt re-reads the durable checkpoint and passes
- *       it back, so the exchange replays what was published while the socket was down.
- *   <li><b>Reconnect with backoff.</b> Exponential with full jitter, so instances that fail
- *       together do not retry in lockstep.
- *   <li><b>Detect a stalled socket.</b> A wedged peer produces no error and no close frame — TCP
- *       is satisfied and the connection simply never speaks again. Only a stall timer catches it,
- *       which is why the exchange sends heartbeats.
+ *   <li><b>Resume from a checkpoint</b>, re-read on every attempt, so the exchange replays what was
+ *       published while the socket was down.
+ *   <li><b>Reconnect</b> after a fixed delay.
+ *   <li><b>Detect a stalled socket.</b> A wedged peer sends no error and no close — TCP is
+ *       satisfied and the connection just goes quiet. Only a stall timer catches that, which is
+ *       why the exchange sends heartbeats.
  * </ol>
  *
- * <p>Reconnection runs in one supervisor loop, not in the socket callbacks: an error and a close
- * for the same failure each fire, and acting on both opens two live sockets.
+ * <p>One supervisor loop drives reconnection, not the socket callbacks: an error and a close fire
+ * for the same failure, and acting on both opens two live sockets.
  */
 public class ExchangeWebSocketClient {
-
-    /** Where consumed quotes go. May block: the socket is not read while it does. */
-    public interface QuoteSink {
-
-        void accept(Quote quote);
-
-        /** Called on a heartbeat, so a partial batch still gets written in a quiet market. */
-        void onIdle();
-    }
 
     private static final Logger log = LoggerFactory.getLogger(ExchangeWebSocketClient.class);
 
     private static final Duration STALL_CHECK_INTERVAL = Duration.ofSeconds(1);
+    private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
 
     private final URI endpoint;
     private final ObjectMapper mapper;
     private final Clock clock;
-    private final MarketDataProperties.ConsumptionSettings settings;
+    private final MarketDataProperties.Consumption settings;
     private final HttpClient http;
 
     private final AtomicBoolean running = new AtomicBoolean();
@@ -76,13 +67,13 @@ public class ExchangeWebSocketClient {
             URI endpoint,
             ObjectMapper mapper,
             Clock clock,
-            MarketDataProperties.ConsumptionSettings settings) {
+            MarketDataProperties.Consumption settings) {
         this.endpoint = endpoint;
         this.mapper = mapper;
         this.clock = clock;
         this.settings = settings;
         this.http = HttpClient.newBuilder()
-                .connectTimeout(settings.getConnectTimeout())
+                .connectTimeout(CONNECT_TIMEOUT)
                 // Virtual threads: the frame handler blocks while it writes to the database.
                 .executor(Executors.newVirtualThreadPerTaskExecutor())
                 .build();
@@ -91,15 +82,17 @@ public class ExchangeWebSocketClient {
     /**
      * Consumes until {@link #stop()}, reconnecting as needed.
      *
+     * @param onQuote receives each quote; may block, and the socket is not read while it does
+     * @param onIdle called on a heartbeat, so a quiet market still gets a tick
      * @param resumePoint read on every attempt, so a reconnect resumes from what is stored now
      */
-    public void start(QuoteSink sink, Supplier<Checkpoint> resumePoint) {
+    public void start(Consumer<Quote> onQuote, Runnable onIdle, Supplier<Checkpoint> resumePoint) {
         if (!running.compareAndSet(false, true)) {
             return;
         }
         supervisor = Thread.ofVirtual()
                 .name("marketdata-consumption")
-                .start(() -> supervise(sink, resumePoint));
+                .start(() -> supervise(onQuote, onIdle, resumePoint));
     }
 
     public void stop() {
@@ -127,18 +120,18 @@ public class ExchangeWebSocketClient {
 
     // ------------------------------------------------------------------ connection lifecycle
 
-    private void supervise(QuoteSink sink, Supplier<Checkpoint> resumePoint) {
+    private void supervise(Consumer<Quote> onQuote, Runnable onIdle, Supplier<Checkpoint> resumePoint) {
         while (running.get()) {
             try {
                 Checkpoint resume = resumePoint.get();
-                Session session = new Session(sink);
+                Session session = new Session(onQuote, onIdle);
 
                 log.info("Connecting to the exchange (resume from {})",
                         resume.isPresent() ? resume.eventTime() : "now");
                 WebSocket ws = http.newWebSocketBuilder()
-                        .connectTimeout(settings.getConnectTimeout())
+                        .connectTimeout(CONNECT_TIMEOUT)
                         .buildAsync(uriFor(resume), session)
-                        .get(settings.getConnectTimeout().toMillis(), TimeUnit.MILLISECONDS);
+                        .get(CONNECT_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
 
                 socket = ws;
                 connected = true;
@@ -172,7 +165,7 @@ public class ExchangeWebSocketClient {
                 return;
             }
             long silentNanos = System.nanoTime() - lastFrameNanos.get();
-            if (silentNanos > settings.getStallTimeout().toNanos()) {
+            if (silentNanos > settings.stallTimeout().toNanos()) {
                 log.warn("Exchange delivered nothing for {}s; treating the socket as dead",
                         TimeUnit.NANOSECONDS.toSeconds(silentNanos));
                 ws.abort();
@@ -191,9 +184,9 @@ public class ExchangeWebSocketClient {
      * @return false if interrupted, meaning shutdown
      */
     private boolean pauseBeforeRetry() {
-        log.info("Reconnecting to the exchange in {}", settings.getReconnectDelay());
+        log.info("Reconnecting to the exchange in {}", settings.reconnectDelay());
         try {
-            Thread.sleep(settings.getReconnectDelay().toMillis());
+            Thread.sleep(settings.reconnectDelay().toMillis());
             return true;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -214,7 +207,7 @@ public class ExchangeWebSocketClient {
 
     // ------------------------------------------------------------------ frames
 
-    private void handleFrame(String payload, QuoteSink sink) {
+    private void handleFrame(String payload, Consumer<Quote> onQuote, Runnable onIdle) {
         JsonNode node;
         try {
             node = mapper.readTree(payload);
@@ -223,10 +216,10 @@ public class ExchangeWebSocketClient {
             return;
         }
         switch (node.path("type").asText("quote")) {
-            case "quote" -> sink.accept(toQuote(node));
+            case "quote" -> onQuote.accept(toQuote(node));
             // The stall timer is already reset by the transport layer; the idle tick is what lets
             // a partial batch be written when the market goes quiet.
-            case "heartbeat" -> sink.onIdle();
+            case "heartbeat" -> onIdle.run();
             case "error" -> log.error("Exchange reported {}: {}",
                     node.path("code").asText("UNKNOWN"), node.path("message").asText());
             default -> log.debug("Ignoring frame of unknown type: {}", truncate(payload));
@@ -255,11 +248,13 @@ public class ExchangeWebSocketClient {
 
         private final CountDownLatch closed = new CountDownLatch(1);
         private final StringBuilder partial = new StringBuilder();
-        private final QuoteSink sink;
+        private final Consumer<Quote> onQuote;
+        private final Runnable onIdle;
         private volatile String reason = "closed";
 
-        private Session(QuoteSink sink) {
-            this.sink = sink;
+        private Session(Consumer<Quote> onQuote, Runnable onIdle) {
+            this.onQuote = onQuote;
+            this.onIdle = onIdle;
         }
 
         @Override
@@ -275,7 +270,7 @@ public class ExchangeWebSocketClient {
                 String payload = partial.toString();
                 partial.setLength(0);
                 try {
-                    handleFrame(payload, sink);
+                    handleFrame(payload, onQuote, onIdle);
                 } catch (RuntimeException e) {
                     log.warn("Could not handle a frame: {}", e.toString());
                 }

@@ -44,7 +44,7 @@ public class QuoteLog {
     private long baseIndex;
 
     public QuoteLog(stockcanyon.MarketDataProperties properties) {
-        this.capacity = properties.getSimulator().getRetainedQuotes();
+        this.capacity = properties.simulator().retainedQuotes();
         this.ring = new ExchangeMessage[capacity];
     }
 

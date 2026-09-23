@@ -48,7 +48,7 @@ public class SimulatedExchange {
             new Instrument("US92826C8394", new BigDecimal("281.45")));  // Visa
 
     private final QuoteLog quoteLog;
-    private final MarketDataProperties.SimulatorSettings settings;
+    private final MarketDataProperties.Simulator settings;
     private final Clock clock;
     private final double[] cumulativeWeights;
     private final BigDecimal[] prices;
@@ -57,15 +57,15 @@ public class SimulatedExchange {
 
     public SimulatedExchange(QuoteLog quoteLog, MarketDataProperties properties, Clock clock) {
         this.quoteLog = quoteLog;
-        this.settings = properties.getSimulator();
+        this.settings = properties.simulator();
         this.clock = clock;
         this.prices = INSTRUMENTS.stream().map(Instrument::openingPrice).toArray(BigDecimal[]::new);
-        this.cumulativeWeights = zipfWeights(INSTRUMENTS.size(), settings.getSkew());
+        this.cumulativeWeights = zipfWeights(INSTRUMENTS.size(), settings.skew());
     }
 
     @PostConstruct
     void start() {
-        int perTick = Math.max(1, settings.getQuotesPerSecond() / TICKS_PER_SECOND);
+        int perTick = Math.max(1, settings.quotesPerSecond() / TICKS_PER_SECOND);
         scheduler.scheduleAtFixedRate(() -> {
             try {
                 emit(perTick);
@@ -74,7 +74,7 @@ public class SimulatedExchange {
             }
         }, 0, 1000 / TICKS_PER_SECOND, TimeUnit.MILLISECONDS);
         log.info("Simulated exchange publishing ~{} quotes/s across {} instruments (Zipf skew {})",
-                settings.getQuotesPerSecond(), INSTRUMENTS.size(), settings.getSkew());
+                settings.quotesPerSecond(), INSTRUMENTS.size(), settings.skew());
     }
 
     @PreDestroy

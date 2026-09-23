@@ -253,6 +253,23 @@ be measured from the rewound position and reported as far larger than it was.
          messages >  N  ->  exactly what would otherwise have been lost
 ```
 
+### What to ask the exchange before trusting any of this
+
+Three questions decide whether the scheme above is sound. All are about the contract, not the code:
+
+1. **Is the boundary `>=` or `>`?** Inclusive means resuming at the checkpoint re-delivers the
+   boundary quotes and loses none. Exclusive means anything sharing that instant is skipped.
+2. **Is `checkpoint_timestamp` a stream cursor that happens to look like a time, or literally the
+   quote's event time?** A cursor is monotonic and the design is safe. An event time is not
+   necessarily monotonic, and then ordering, ties and late arrivals all become correctness
+   concerns.
+3. **Is there a sequence number?** Recovery and gap *detection* are different problems. A timestamp
+   checkpoint recovers from failures you noticed; only a counter proves nothing was missed
+   silently.
+
+This implementation assumes inclusive, ordered, and sequenced — which the simulated exchange is.
+Against a real feed those are the first things to confirm.
+
 ---
 
 ## 5. Duplicates are the deliberate outcome

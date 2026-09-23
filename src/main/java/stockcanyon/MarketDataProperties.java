@@ -4,208 +4,77 @@ import java.time.Duration;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
-/** Configuration for the market data service. */
+/** Settings, bound from {@code marketdata.*}. */
 @ConfigurationProperties(prefix = "marketdata")
-public class MarketDataProperties {
+public record MarketDataProperties(
+        boolean enabled,
+        String exchangeUrl,
+        Database database,
+        Consumption consumption,
+        Simulator simulator) {
 
-    /** Master switch. */
-    private boolean enabled = false;
-
-    /** The Stock Exchange feed. {@code ?checkpoint_timestamp=} is appended by the client. */
-    private String exchangeUrl = "ws://localhost:8099/exchange/quotes";
-
-    private final DataSourceSettings datasource = new DataSourceSettings();
-    private final ConsumptionSettings consumption = new ConsumptionSettings();
-    private final SimulatorSettings simulator = new SimulatorSettings();
-
-    public boolean isEnabled() {
-        return enabled;
-    }
-
-    public void setEnabled(boolean enabled) {
-        this.enabled = enabled;
-    }
-
-    public String getExchangeUrl() {
-        return exchangeUrl;
-    }
-
-    public void setExchangeUrl(String exchangeUrl) {
-        this.exchangeUrl = exchangeUrl;
-    }
-
-    public DataSourceSettings getDatasource() {
-        return datasource;
-    }
-
-    public ConsumptionSettings getConsumption() {
-        return consumption;
-    }
-
-    public SimulatorSettings getSimulator() {
-        return simulator;
-    }
-
-    /** A dedicated pool, so the market data schema is this module's concern alone. */
-    public static class DataSourceSettings {
-
-        private String url = "jdbc:postgresql://localhost:5432/marketdata";
-        private String username = "marketdata";
-        private String password = "marketdata";
-
-        /** Small: the write path is one thread, the read path one indexed lookup. */
-        private int maxPoolSize = 8;
-
-        public String getUrl() {
-            return url;
+    public MarketDataProperties {
+        if (database == null) {
+            database = new Database(null, null, null);
         }
-
-        public void setUrl(String url) {
-            this.url = url;
+        if (consumption == null) {
+            consumption = new Consumption(0, null, null, null);
         }
-
-        public String getUsername() {
-            return username;
-        }
-
-        public void setUsername(String username) {
-            this.username = username;
-        }
-
-        public String getPassword() {
-            return password;
-        }
-
-        public void setPassword(String password) {
-            this.password = password;
-        }
-
-        public int getMaxPoolSize() {
-            return maxPoolSize;
-        }
-
-        public void setMaxPoolSize(int maxPoolSize) {
-            this.maxPoolSize = maxPoolSize;
+        if (simulator == null) {
+            simulator = new Simulator(false, 0, 0, 0);
         }
     }
 
-    public static class ConsumptionSettings {
+    public record Database(String url, String username, String password) {}
 
-        /** Whether this instance consumes. Off on read replicas. */
-        private boolean enabled = true;
+    /**
+     * @param maxBatchSize bounds one transaction
+     * @param flushInterval latency versus throughput: how stale the latest quote may be, and how
+     *     much work one commit amortises
+     * @param reconnectDelay fixed wait between reconnect attempts, so a refusing exchange is not
+     *     hammered in a tight loop
+     * @param stallTimeout silence after which the socket is presumed dead. Must exceed the
+     *     exchange's heartbeat interval, or a quiet market reads as a broken connection.
+     */
+    public record Consumption(
+            int maxBatchSize,
+            Duration flushInterval,
+            Duration reconnectDelay,
+            Duration stallTimeout) {
 
-        /** Bounds one transaction. */
-        private int maxBatchSize = 2_000;
-
-        /** Latency vs throughput: bounds staleness, and how much one commit amortises. */
-        private Duration flushInterval = Duration.ofMillis(200);
-
-        /** Fixed wait between reconnect attempts, so a refusing exchange is not hammered. */
-        private Duration reconnectDelay = Duration.ofSeconds(1);
-
-        /** Must exceed the heartbeat interval, or a quiet market reads as a dead socket. */
-        private Duration stallTimeout = Duration.ofSeconds(15);
-
-
-        private Duration connectTimeout = Duration.ofSeconds(10);
-
-        public boolean isEnabled() {
-            return enabled;
-        }
-
-        public void setEnabled(boolean enabled) {
-            this.enabled = enabled;
-        }
-
-
-        public int getMaxBatchSize() {
-            return maxBatchSize;
-        }
-
-        public void setMaxBatchSize(int maxBatchSize) {
-            this.maxBatchSize = maxBatchSize;
-        }
-
-        public Duration getFlushInterval() {
-            return flushInterval;
-        }
-
-        public void setFlushInterval(Duration flushInterval) {
-            this.flushInterval = flushInterval;
-        }
-
-
-
-        public Duration getStallTimeout() {
-            return stallTimeout;
-        }
-
-        public void setStallTimeout(Duration stallTimeout) {
-            this.stallTimeout = stallTimeout;
-        }
-
-
-        public Duration getReconnectDelay() {
-            return reconnectDelay;
-        }
-
-        public void setReconnectDelay(Duration reconnectDelay) {
-            this.reconnectDelay = reconnectDelay;
-        }
-
-        public Duration getConnectTimeout() {
-            return connectTimeout;
-        }
-
-        public void setConnectTimeout(Duration connectTimeout) {
-            this.connectTimeout = connectTimeout;
+        public Consumption {
+            if (maxBatchSize <= 0) {
+                maxBatchSize = 2_000;
+            }
+            if (flushInterval == null) {
+                flushInterval = Duration.ofMillis(200);
+            }
+            if (reconnectDelay == null) {
+                reconnectDelay = Duration.ofSeconds(1);
+            }
+            if (stallTimeout == null) {
+                stallTimeout = Duration.ofSeconds(15);
+            }
         }
     }
 
-    /** The stand-in exchange. Not part of the service. */
-    public static class SimulatorSettings {
+    /**
+     * @param retainedQuotes replay window; an outage longer than this cannot be recovered
+     * @param skew Zipf exponent. At 1.1 the busiest instrument gets ~100x the quietest, which is
+     *     the uneven arrival rate the brief calls out.
+     */
+    public record Simulator(boolean enabled, int quotesPerSecond, int retainedQuotes, double skew) {
 
-        private boolean enabled = false;
-
-        /** Aggregate rate across all instruments. */
-        private int quotesPerSecond = 200;
-
-        /** Replay window. At 200 q/s this is roughly forty minutes. */
-        private int retainedQuotes = 500_000;
-
-        /** Zipf exponent. At 1.1 the busiest instrument gets ~100x the quietest. */
-        private double skew = 1.1;
-
-        public boolean isEnabled() {
-            return enabled;
-        }
-
-        public void setEnabled(boolean enabled) {
-            this.enabled = enabled;
-        }
-
-        public int getQuotesPerSecond() {
-            return quotesPerSecond;
-        }
-
-        public void setQuotesPerSecond(int quotesPerSecond) {
-            this.quotesPerSecond = quotesPerSecond;
-        }
-
-        public int getRetainedQuotes() {
-            return retainedQuotes;
-        }
-
-        public void setRetainedQuotes(int retainedQuotes) {
-            this.retainedQuotes = retainedQuotes;
-        }
-
-        public double getSkew() {
-            return skew;
-        }
-
-        public void setSkew(double skew) {
-            this.skew = skew;
+        public Simulator {
+            if (quotesPerSecond <= 0) {
+                quotesPerSecond = 200;
+            }
+            if (retainedQuotes <= 0) {
+                retainedQuotes = 500_000;
+            }
+            if (skew <= 0) {
+                skew = 1.1;
+            }
         }
     }
 }

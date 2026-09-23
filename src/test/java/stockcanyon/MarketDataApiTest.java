@@ -43,9 +43,9 @@ class MarketDataApiTest {
         registry.add("marketdata.exchange-url", () -> "ws://localhost:" + PORT + "/exchange/quotes");
         registry.add("marketdata.simulator.enabled", () -> true);
         registry.add("marketdata.simulator.quotes-per-second", () -> 400);
-        registry.add("marketdata.datasource.url", () -> SharedPostgres.jdbcUrlFor("api_test"));
-        registry.add("marketdata.datasource.username", SharedPostgres.INSTANCE::getUsername);
-        registry.add("marketdata.datasource.password", SharedPostgres.INSTANCE::getPassword);
+        registry.add("marketdata.database.url", () -> SharedPostgres.jdbcUrlFor("api_test"));
+        registry.add("marketdata.database.username", SharedPostgres.INSTANCE::getUsername);
+        registry.add("marketdata.database.password", SharedPostgres.INSTANCE::getPassword);
         registry.add("marketdata.consumption.flush-interval", () -> "50ms");
     }
 

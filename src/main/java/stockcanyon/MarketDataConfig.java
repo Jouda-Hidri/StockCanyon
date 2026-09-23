@@ -24,27 +24,22 @@ import stockcanyon.consumption.QuoteConsumer;
 import stockcanyon.storage.CheckpointRepository;
 import stockcanyon.storage.QuoteRepository;
 
-/**
- * Wires consumption, storage and distribution.
- *
- * <p>The pool, migrations and transaction manager are this module's own rather than
- * application-wide, so the service owns its schema outright.
- */
+/** Wires consumption, storage and distribution. */
 @Configuration
 @EnableConfigurationProperties(MarketDataProperties.class)
 @ConditionalOnProperty(prefix = "marketdata", name = "enabled", havingValue = "true")
 public class MarketDataConfig {
 
-    // ---------------------------------------------------------------- storage
+    /** The write path is one thread and the read path one indexed lookup. */
+    private static final int POOL_SIZE = 8;
 
     @Bean(destroyMethod = "close")
     public DataSource marketDataDataSource(MarketDataProperties properties) {
-        MarketDataProperties.DataSourceSettings settings = properties.getDatasource();
         HikariConfig config = new HikariConfig();
-        config.setJdbcUrl(settings.getUrl());
-        config.setUsername(settings.getUsername());
-        config.setPassword(settings.getPassword());
-        config.setMaximumPoolSize(settings.getMaxPoolSize());
+        config.setJdbcUrl(properties.database().url());
+        config.setUsername(properties.database().username());
+        config.setPassword(properties.database().password());
+        config.setMaximumPoolSize(POOL_SIZE);
         config.setPoolName("marketdata");
         // One multi-row statement per batch: one round trip per flush, not per quote.
         config.addDataSourceProperty("reWriteBatchedInserts", "true");
@@ -91,29 +86,14 @@ public class MarketDataConfig {
         return new CheckpointRepository(marketDataJdbcTemplate);
     }
 
-    // ---------------------------------------------------------------- consumption
-
-    /**
-     * Only on the instance that consumes.
-     *
-     * <p>Off on read replicas so exactly one process writes. Several writers would each keep their
-     * own checkpoint and replay each other's work — correct, but a multiple of the necessary load.
-     */
     @Bean
-    @ConditionalOnProperty(prefix = "marketdata.consumption", name = "enabled",
-            havingValue = "true", matchIfMissing = true)
     public ExchangeWebSocketClient exchangeWebSocketClient(
             MarketDataProperties properties, ObjectMapper objectMapper, Clock clock) {
         return new ExchangeWebSocketClient(
-                URI.create(properties.getExchangeUrl()),
-                objectMapper,
-                clock,
-                properties.getConsumption());
+                URI.create(properties.exchangeUrl()), objectMapper, clock, properties.consumption());
     }
 
     @Bean
-    @ConditionalOnProperty(prefix = "marketdata.consumption", name = "enabled",
-            havingValue = "true", matchIfMissing = true)
     public QuoteConsumer quoteConsumer(
             ExchangeWebSocketClient exchangeWebSocketClient,
             QuoteRepository quoteRepository,
@@ -127,7 +107,6 @@ public class MarketDataConfig {
                 checkpointRepository,
                 marketDataTransactionTemplate,
                 clock,
-                properties.getConsumption().getMaxBatchSize(),
-                properties.getConsumption().getFlushInterval());
+                properties.consumption());
     }
 }

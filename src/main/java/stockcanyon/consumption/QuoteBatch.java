@@ -52,8 +52,15 @@ public final class QuoteBatch {
     /**
      * Newest quote in the batch — what the checkpoint must name.
      *
-     * <p>Computed rather than taken as the last element, so a batch delivered slightly out of order
-     * cannot set the checkpoint from the wrong quote and skip the other on resume.
+     * <p>Computed rather than taken as the last element, so an out-of-order batch cannot set the
+     * checkpoint from the wrong quote.
+     *
+     * <p><b>Assumes the exchange orders the stream by event time.</b> If it does not, a quote
+     * stamped .150 could arrive in a later batch than one stamped .200 — the checkpoint would
+     * already be .200, and a crash before the late quote arrived would lose it, since resuming
+     * from .200 never re-delivers it. Safe here because the exchange stamps in publish order.
+     * Against a real feed this needs confirming; if the stream can be unordered, the checkpoint
+     * has to be the low-water mark — the highest instant below which nothing is still outstanding.
      */
     public static Quote highWaterMark(List<Quote> batch) {
         Quote highest = batch.getFirst();
