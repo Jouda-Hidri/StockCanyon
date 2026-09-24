@@ -3,7 +3,6 @@ package stockcanyon.simulator;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Clock;
-import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -12,6 +11,7 @@ import java.util.concurrent.TimeUnit;
 
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+import org.apache.commons.math3.distribution.ZipfDistribution;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -50,7 +50,7 @@ public class SimulatedExchange {
     private final QuoteLog quoteLog;
     private final MarketDataProperties.Simulator settings;
     private final Clock clock;
-    private final double[] cumulativeWeights;
+    private final ZipfDistribution instrumentPicker;
     private final BigDecimal[] prices;
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(
             runnable -> Thread.ofPlatform().name("marketdata-simulator").unstarted(runnable));
@@ -60,7 +60,7 @@ public class SimulatedExchange {
         this.settings = properties.simulator();
         this.clock = clock;
         this.prices = INSTRUMENTS.stream().map(Instrument::openingPrice).toArray(BigDecimal[]::new);
-        this.cumulativeWeights = zipfWeights(INSTRUMENTS.size(), settings.skew());
+        this.instrumentPicker = new ZipfDistribution(INSTRUMENTS.size(), settings.skew());
     }
 
     @PostConstruct
@@ -84,7 +84,7 @@ public class SimulatedExchange {
 
     private void emit(int count) {
         for (int i = 0; i < count; i++) {
-            int index = pickInstrument();
+            int index = instrumentPicker.sample() - 1;   // samples 1..n
             BigDecimal mid = nextPrice(index);
             BigDecimal halfSpread = mid.multiply(new BigDecimal("0.0002")).setScale(4, RoundingMode.HALF_UP);
             String isin = INSTRUMENTS.get(index).isin();
@@ -117,21 +117,4 @@ public class SimulatedExchange {
         return BigDecimal.valueOf(ThreadLocalRandom.current().nextInt(1, 40) * 25L);
     }
 
-    private int pickInstrument() {
-        double target = ThreadLocalRandom.current().nextDouble()
-                * cumulativeWeights[cumulativeWeights.length - 1];
-        int position = Arrays.binarySearch(cumulativeWeights, target);
-        return position >= 0 ? position : Math.min(-position - 1, cumulativeWeights.length - 1);
-    }
-
-    /** Cumulative Zipf weights: rank k gets weight proportional to 1/k^skew. */
-    private static double[] zipfWeights(int size, double skew) {
-        double[] cumulative = new double[size];
-        double running = 0;
-        for (int k = 0; k < size; k++) {
-            running += 1.0 / Math.pow(k + 1, skew);
-            cumulative[k] = running;
-        }
-        return cumulative;
-    }
 }

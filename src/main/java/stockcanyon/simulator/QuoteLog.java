@@ -2,17 +2,20 @@ package stockcanyon.simulator;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentNavigableMap;
+import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongFunction;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.ReentrantLock;
 
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
+import stockcanyon.MarketDataProperties;
+
 /**
- * Bounded append-only log addressed by a monotonic index. What makes replay possible.
+ * Bounded append-only log keyed by sequence. What makes replay possible.
  *
  * <p>Replay and live streaming are the same operation — a reader holds a cursor and pulls forward.
  * That removes the race in "replay the backlog, then subscribe", where quotes published between
@@ -25,127 +28,80 @@ public class QuoteLog {
     /** Outcome of a read. {@code messages} is empty if the wait elapsed with nothing appended. */
     public record Batch(long nextCursor, List<ExchangeMessage> messages) {}
 
-    /** Thrown when a cursor has fallen off the back of the ring: the data is genuinely gone. */
+    /** Thrown when a cursor has fallen off the back of the window: the data is genuinely gone. */
     public static class EvictedException extends RuntimeException {
         public EvictedException(String message) {
             super(message);
         }
     }
 
-    private final ReentrantLock lock = new ReentrantLock();
-    private final Condition appended = lock.newCondition();
-    private final ExchangeMessage[] ring;
+    /** How long a reader waits between polls while the log is idle. */
+    private static final Duration POLL_INTERVAL = Duration.ofMillis(20);
+
+    private final ConcurrentNavigableMap<Long, ExchangeMessage> messages = new ConcurrentSkipListMap<>();
+    private final AtomicLong nextSequence = new AtomicLong();
     private final int capacity;
 
-    /** Index the next message will be given. Doubles as the exchange's sequence number. */
-    private long nextIndex;
-
-    /** Index of the oldest message still retained. */
-    private long baseIndex;
-
-    public QuoteLog(stockcanyon.MarketDataProperties properties) {
+    public QuoteLog(MarketDataProperties properties) {
         this.capacity = properties.simulator().retainedQuotes();
-        this.ring = new ExchangeMessage[capacity];
     }
 
     /** Appends a message and returns the sequence it was assigned. */
     public long append(LongFunction<ExchangeMessage> factory) {
-        lock.lock();
-        try {
-            long sequence = nextIndex;
-            ring[slot(sequence)] = factory.apply(sequence);
-            nextIndex = sequence + 1;
-            if (nextIndex - baseIndex > capacity) {
-                baseIndex = nextIndex - capacity;
-            }
-            appended.signalAll();
-            return sequence;
-        } finally {
-            lock.unlock();
-        }
+        long sequence = nextSequence.getAndIncrement();
+        messages.put(sequence, factory.apply(sequence));
+        // Evict by key rather than by size: ConcurrentSkipListMap.size() walks the whole map.
+        messages.headMap(sequence - capacity + 1).clear();
+        return sequence;
     }
 
     /**
      * Reads up to {@code max} messages from {@code cursor}, waiting up to {@code timeout}.
      *
-     * @throws EvictedException if {@code cursor} names data already overwritten
+     * @throws EvictedException if {@code cursor} names data already evicted
      */
     public Batch read(long cursor, int max, Duration timeout) throws InterruptedException {
-        lock.lock();
-        try {
-            long remaining = timeout.toNanos();
-            while (cursor >= nextIndex && remaining > 0) {
-                remaining = appended.awaitNanos(remaining);
-            }
-            if (cursor < baseIndex) {
-                throw new EvictedException("cursor %d is older than the retained window (oldest=%d)"
-                        .formatted(cursor, baseIndex));
-            }
-            int count = (int) Math.min(max, nextIndex - cursor);
-            if (count <= 0) {
-                return new Batch(cursor, List.of());
-            }
-            List<ExchangeMessage> out = new ArrayList<>(count);
-            for (long i = cursor; i < cursor + count; i++) {
-                out.add(ring[slot(i)]);
-            }
-            return new Batch(cursor + count, out);
-        } finally {
-            lock.unlock();
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (messages.tailMap(cursor).isEmpty() && System.nanoTime() < deadline) {
+            Thread.sleep(POLL_INTERVAL.toMillis());
         }
+        Map.Entry<Long, ExchangeMessage> oldest = messages.firstEntry();
+        if (oldest != null && cursor < oldest.getKey()) {
+            throw new EvictedException("cursor %d is older than the retained window (oldest=%d)"
+                    .formatted(cursor, oldest.getKey()));
+        }
+        List<ExchangeMessage> page = messages.tailMap(cursor).values().stream().limit(max).toList();
+        return new Batch(cursor + page.size(), page);
     }
 
     /**
      * Resolves a {@code checkpoint_timestamp} to a cursor: the first message at or after it.
      *
-     * <p>Inclusive on purpose. Several quotes can share an instant, so an exclusive boundary would drop
-     * them all. The consumer deduplicates, so a duplicate is always preferred to a gap.
+     * <p>Inclusive on purpose. Several quotes can share an instant, so an exclusive boundary would
+     * drop them all. The consumer deduplicates, so a duplicate is always preferred to a gap.
      *
      * @throws EvictedException if the checkpoint predates the retained window
      */
     public long cursorAtOrAfter(Instant checkpoint) {
-        lock.lock();
-        try {
-            if (baseIndex < nextIndex) {
-                ExchangeMessage oldest = ring[slot(baseIndex)];
-                if (oldest.timestamp().isAfter(checkpoint)) {
-                    throw new EvictedException(
-                            "checkpoint %s predates the retained window (oldest=%s)"
-                                    .formatted(checkpoint, oldest.timestamp()));
-                }
-            }
-            // Assigned in append order, so the log is sorted.
-            long low = baseIndex;
-            long high = nextIndex;
-            while (low < high) {
-                long mid = low + (high - low) / 2;
-                if (ring[slot(mid)].timestamp().isBefore(checkpoint)) {
-                    low = mid + 1;
-                } else {
-                    high = mid;
-                }
-            }
-            return low;
-        } finally {
-            lock.unlock();
+        Map.Entry<Long, ExchangeMessage> oldest = messages.firstEntry();
+        if (oldest != null && oldest.getValue().timestamp().isAfter(checkpoint)) {
+            throw new EvictedException("checkpoint %s predates the retained window (oldest=%s)"
+                    .formatted(checkpoint, oldest.getValue().timestamp()));
         }
+        // Sequences are assigned in publish order, so the log is already sorted by timestamp.
+        return messages.entrySet().stream()
+                .filter(entry -> !entry.getValue().timestamp().isBefore(checkpoint))
+                .mapToLong(Map.Entry::getKey)
+                .findFirst()
+                .orElse(nextSequence.get());
     }
 
     /** Where a "subscribe from now" reader starts. */
     public long tailCursor() {
-        lock.lock();
-        try {
-            return nextIndex;
-        } finally {
-            lock.unlock();
-        }
+        return nextSequence.get();
     }
 
     public long published() {
         return tailCursor();
-    }
-
-    private int slot(long index) {
-        return (int) Math.floorMod(index, capacity);
     }
 }

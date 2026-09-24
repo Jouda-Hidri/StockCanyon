@@ -14,7 +14,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.DependsOn;
-import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -61,8 +61,8 @@ public class MarketDataConfig {
     // On the template, not each repository, so a new repository cannot forget it.
     @Bean
     @DependsOn("marketDataFlyway")
-    public JdbcTemplate marketDataJdbcTemplate(DataSource marketDataDataSource) {
-        return new JdbcTemplate(marketDataDataSource);
+    public NamedParameterJdbcTemplate marketDataJdbcTemplate(DataSource marketDataDataSource) {
+        return new NamedParameterJdbcTemplate(marketDataDataSource);
     }
 
     @Bean
@@ -77,12 +77,12 @@ public class MarketDataConfig {
     }
 
     @Bean
-    public QuoteRepository quoteRepository(JdbcTemplate marketDataJdbcTemplate) {
+    public QuoteRepository quoteRepository(NamedParameterJdbcTemplate marketDataJdbcTemplate) {
         return new QuoteRepository(marketDataJdbcTemplate);
     }
 
     @Bean
-    public CheckpointRepository checkpointRepository(JdbcTemplate marketDataJdbcTemplate) {
+    public CheckpointRepository checkpointRepository(NamedParameterJdbcTemplate marketDataJdbcTemplate) {
         return new CheckpointRepository(marketDataJdbcTemplate);
     }
 

@@ -1,7 +1,5 @@
 package stockcanyon.storage;
 
-import java.math.BigDecimal;
-import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
@@ -10,9 +8,10 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
-import org.springframework.jdbc.core.BatchPreparedStatementSetter;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.springframework.jdbc.core.namedparam.SqlParameterSource;
 
 import stockcanyon.Isin;
 import stockcanyon.Quote;
@@ -21,11 +20,11 @@ import stockcanyon.Quote;
  * Stores quotes and reads the latest one back.
  *
  * <p>Two tables: {@code quote} is the append-only history, {@code latest_quote} one row per
- * instrument. Serving "latest" from the history would mean {@code ORDER BY ... LIMIT 1} over a
+ * instrument. Serving "latest" from the history would mean an {@code ORDER BY ... LIMIT 1} over a
  * table growing by millions of rows a day.
  *
- * <p>Plain JDBC, not JPA: the hot path needs a conflict-ignoring multi-row insert and a
- * conditional upsert, both of which an ORM gets in the way of.
+ * <p>Plain JDBC, not JPA: the hot path needs a conflict-ignoring multi-row insert and a conditional
+ * upsert, both of which an ORM gets in the way of.
  */
 public class QuoteRepository {
 
@@ -33,21 +32,23 @@ public class QuoteRepository {
     private static final String INSERT_HISTORY = """
             INSERT INTO quote (isin, event_time, sequence, bid, ask, bid_size, ask_size,
                                currency, received_time)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (:isin, :eventTime, :sequence, :bid, :ask, :bidSize, :askSize,
+                    :currency, :receivedTime)
             ON CONFLICT ON CONSTRAINT quote_pk DO NOTHING
             """;
 
     /**
      * The WHERE guard is why a recovery cannot corrupt the read path.
      *
-     * <p>Replay delivers quotes out of order; without it, last-write-wins would leave the latest quote
-     * showing a price from minutes ago. In SQL rather than in Java so it is also correct under
-     * concurrency — the upsert locks the row.
+     * <p>Replay delivers quotes out of order; without it, last-write-wins would leave the latest
+     * quote showing a price from minutes ago. In SQL rather than in Java so it is also correct
+     * under concurrency — the upsert locks the row.
      */
     private static final String UPSERT_LATEST = """
             INSERT INTO latest_quote (isin, event_time, sequence, bid, ask, bid_size, ask_size,
                                       currency, received_time, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (:isin, :eventTime, :sequence, :bid, :ask, :bidSize, :askSize,
+                    :currency, :receivedTime, :updatedAt)
             ON CONFLICT ON CONSTRAINT latest_quote_pk DO UPDATE SET
                 event_time    = EXCLUDED.event_time,
                 sequence      = EXCLUDED.sequence,
@@ -66,16 +67,16 @@ public class QuoteRepository {
     private static final String COLUMNS =
             "isin, event_time, sequence, bid, ask, bid_size, ask_size, currency, received_time";
 
-    private final JdbcTemplate jdbc;
+    private final NamedParameterJdbcTemplate jdbc;
 
-    public QuoteRepository(JdbcTemplate jdbc) {
+    public QuoteRepository(NamedParameterJdbcTemplate jdbc) {
         this.jdbc = jdbc;
     }
 
     /** Appends a batch, discarding anything already stored. */
     public void insertHistory(List<Quote> quotes) {
         if (!quotes.isEmpty()) {
-            jdbc.batchUpdate(INSERT_HISTORY, new QuoteBatch(quotes, null));
+            jdbc.batchUpdate(INSERT_HISTORY, parameters(quotes, null));
         }
     }
 
@@ -88,24 +89,44 @@ public class QuoteRepository {
      */
     public void upsertLatest(Collection<Quote> quotes, Instant updatedAt) {
         if (!quotes.isEmpty()) {
-            jdbc.batchUpdate(UPSERT_LATEST, new QuoteBatch(List.copyOf(quotes), updatedAt));
+            jdbc.batchUpdate(UPSERT_LATEST, parameters(quotes, updatedAt));
         }
     }
 
     /** The latest quote for an instrument — what the API serves. */
     public Optional<Quote> findLatest(Isin isin) {
-        return jdbc.query("SELECT " + COLUMNS + " FROM latest_quote WHERE isin = ?",
-                MAPPER, isin.value()).stream().findFirst();
+        return jdbc.query("SELECT " + COLUMNS + " FROM latest_quote WHERE isin = :isin",
+                new MapSqlParameterSource("isin", isin.value()), MAPPER).stream().findFirst();
     }
 
     public long countStoredQuotes() {
-        Long count = jdbc.queryForObject("SELECT count(*) FROM quote", Long.class);
-        return count == null ? 0 : count;
+        return count("SELECT count(*) FROM quote");
     }
 
     public long countInstruments() {
-        Long count = jdbc.queryForObject("SELECT count(*) FROM latest_quote", Long.class);
-        return count == null ? 0 : count;
+        return count("SELECT count(*) FROM latest_quote");
+    }
+
+    private long count(String sql) {
+        Long value = jdbc.queryForObject(sql, new MapSqlParameterSource(), Long.class);
+        return value == null ? 0 : value;
+    }
+
+    /** Both statements name the same parameters; {@code updatedAt} is null for the history insert. */
+    private static SqlParameterSource[] parameters(Collection<Quote> quotes, Instant updatedAt) {
+        return quotes.stream()
+                .map(quote -> new MapSqlParameterSource()
+                        .addValue("isin", quote.isin().value())
+                        .addValue("eventTime", Timestamp.from(quote.eventTime()))
+                        .addValue("sequence", quote.sequence())
+                        .addValue("bid", quote.bid())
+                        .addValue("ask", quote.ask())
+                        .addValue("bidSize", quote.bidSize())
+                        .addValue("askSize", quote.askSize())
+                        .addValue("currency", quote.currency())
+                        .addValue("receivedTime", Timestamp.from(quote.receivedTime()))
+                        .addValue("updatedAt", updatedAt == null ? null : Timestamp.from(updatedAt)))
+                .toArray(SqlParameterSource[]::new);
     }
 
     private static final RowMapper<Quote> MAPPER = (rs, rowNum) -> new Quote(
@@ -122,41 +143,5 @@ public class QuoteRepository {
     private static Instant instant(ResultSet rs, String column) throws SQLException {
         Timestamp value = rs.getTimestamp(column);
         return value == null ? null : value.toInstant();
-    }
-
-    /** Binds a quote to either statement; they share a column order. */
-    private record QuoteBatch(List<Quote> quotes, Instant updatedAt)
-            implements BatchPreparedStatementSetter {
-
-        @Override
-        public void setValues(PreparedStatement ps, int i) throws SQLException {
-            Quote q = quotes.get(i);
-            ps.setString(1, q.isin().value());
-            ps.setTimestamp(2, Timestamp.from(q.eventTime()));
-            ps.setLong(3, q.sequence());
-            setDecimal(ps, 4, q.bid());
-            setDecimal(ps, 5, q.ask());
-            setDecimal(ps, 6, q.bidSize());
-            setDecimal(ps, 7, q.askSize());
-            ps.setString(8, q.currency());
-            ps.setTimestamp(9, Timestamp.from(q.receivedTime()));
-            if (updatedAt != null) {
-                ps.setTimestamp(10, Timestamp.from(updatedAt));
-            }
-        }
-
-        @Override
-        public int getBatchSize() {
-            return quotes.size();
-        }
-
-        private static void setDecimal(PreparedStatement ps, int index, BigDecimal value)
-                throws SQLException {
-            if (value == null) {
-                ps.setNull(index, java.sql.Types.NUMERIC);
-            } else {
-                ps.setBigDecimal(index, value);
-            }
-        }
     }
 }

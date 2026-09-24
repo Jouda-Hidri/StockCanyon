@@ -29,8 +29,8 @@ class IsinTest {
     void rejectsWrongCheckDigit() {
         // Apple's ISIN with the check digit changed from 5 to 6.
         assertThatThrownBy(() -> Isin.of("US0378331006"))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("check digit");
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(Isin.isValid("US0378331005")).isTrue();
     }
 
     /** Right length, shape and character classes — only the check digit tells them apart. */

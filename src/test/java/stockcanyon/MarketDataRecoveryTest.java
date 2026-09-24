@@ -13,7 +13,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
@@ -66,7 +66,7 @@ class MarketDataRecoveryTest {
     SimulatedExchangeHandler exchange;
 
     @Autowired
-    JdbcTemplate marketDataJdbcTemplate;
+    NamedParameterJdbcTemplate marketDataJdbcTemplate;
 
     @Test
     @DisplayName("a mid-stream disconnect loses no messages")
@@ -167,7 +167,7 @@ class MarketDataRecoveryTest {
                 .pollInterval(Duration.ofMillis(100))
                 .until(() -> consumer.status().quotesConsumed() > 3_000);
 
-        List<Long> counts = marketDataJdbcTemplate.queryForList(
+        List<Long> counts = marketDataJdbcTemplate.getJdbcTemplate().queryForList(
                 "SELECT count(*) AS c FROM quote GROUP BY isin ORDER BY c DESC", Long.class);
 
         assertThat(counts).hasSizeGreaterThan(1);
@@ -189,21 +189,21 @@ class MarketDataRecoveryTest {
      * values. Cheaper than listing them, and it is the same question.
      */
     private boolean storedSequencesAreContiguous() {
-        Boolean contiguous = marketDataJdbcTemplate.queryForObject(
+        Boolean contiguous = marketDataJdbcTemplate.getJdbcTemplate().queryForObject(
                 "SELECT count(DISTINCT sequence) = (max(sequence) - min(sequence) + 1) FROM quote",
                 Boolean.class);
         return Boolean.TRUE.equals(contiguous);
     }
 
     private String sequenceSpan() {
-        return marketDataJdbcTemplate.queryForObject(
+        return marketDataJdbcTemplate.getJdbcTemplate().queryForObject(
                 "SELECT 'min=' || min(sequence) || ' max=' || max(sequence) "
                         + "|| ' distinct=' || count(DISTINCT sequence) FROM quote",
                 String.class);
     }
 
     private Map<String, Long> latestSequencesByIsin() {
-        return marketDataJdbcTemplate.query(
+        return marketDataJdbcTemplate.getJdbcTemplate().query(
                 "SELECT isin, sequence FROM latest_quote",
                 rs -> {
                     Map<String, Long> out = new java.util.HashMap<>();
@@ -215,7 +215,7 @@ class MarketDataRecoveryTest {
     }
 
     private long queryLong(String sql) {
-        Long value = marketDataJdbcTemplate.queryForObject(sql, Long.class);
+        Long value = marketDataJdbcTemplate.getJdbcTemplate().queryForObject(sql, Long.class);
         return value == null ? 0 : value;
     }
 

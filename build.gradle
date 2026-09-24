@@ -42,6 +42,14 @@ dependencies {
     // So consumption lag is observable from outside the process.
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
 
+    // ISIN validation, check digit included. Writing the ISO 6166 Luhn variant by hand is about
+    // forty lines of something a library already gets right.
+    implementation 'commons-validator:commons-validator:1.9.0'
+
+    // Zipf sampling for the simulated exchange, so the uneven arrival rate is a named distribution
+    // rather than a hand-rolled cumulative-weight table and binary search.
+    implementation 'org.apache.commons:commons-math3:3.6.1'
+
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 
