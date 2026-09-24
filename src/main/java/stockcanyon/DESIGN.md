@@ -27,10 +27,15 @@ design is arranged around.
     MarketDataProperties   settings
 
     consumption/           FEATURE 1
-      ExchangeWebSocketClient   connect, reconnect, backoff, stall detect, parse
-      QuoteBatch                coalescing + deduplication
-      SequenceTracker           gap detection
-      QuoteConsumer             batches, and the transaction tying data to checkpoint
+      ExchangeWebSocketClient   reconnect loop + stall timer -- hand-written:
+                                no mainstream WS client auto-reconnects
+                                (protocol = JDK, parsing = Jackson)
+      QuoteBatch                domain rules over JDK collectors: which quote
+                                wins, what key defines a duplicate
+      SequenceTracker           ~15 lines of gap verdicts; no lib knows them
+      QuoteConsumer             batching (Reactor bufferTimeout is the lib
+                                shape; not worth the paradigm here) + the
+                                transaction (Spring TransactionTemplate)
 
     storage/               FEATURE 2
       QuoteRepository           quote (history) + latest_quote (projection)
