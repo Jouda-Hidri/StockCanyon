@@ -39,6 +39,11 @@ CREATE TABLE latest_quote (
 -- How far the feed has been consumed. Written in the same transaction as the quotes it covers,
 -- which is the entire gap-free guarantee: a crash between the two would otherwise lose quotes or
 -- silently advance past them.
+--
+-- A separate row rather than derived from quote (max(sequence) would equal it today), because the
+-- checkpoint must outlive the data it certifies: retention that prunes old history must not move
+-- the resume position backwards. It is also the only "newest overall" lookup, and the quote PK
+-- leads with isin -- deriving it would need a global index paid on every insert.
 CREATE TABLE ingest_checkpoint (
     feed        TEXT         NOT NULL,
     event_time  TIMESTAMPTZ  NOT NULL,
