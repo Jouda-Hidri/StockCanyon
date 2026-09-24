@@ -18,10 +18,10 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.NestedExceptionUtils;
 
 import stockcanyon.Checkpoint;
 import stockcanyon.Isin;
@@ -143,7 +143,7 @@ public class ExchangeWebSocketClient {
                 break;
             } catch (Exception e) {
                 if (running.get()) {
-                    log.warn("Exchange connection attempt failed: {}", rootMessage(e));
+                    log.warn("Exchange connection attempt failed: {}", NestedExceptionUtils.getMostSpecificCause(e).toString());
                 }
             } finally {
                 connected = false;
@@ -207,35 +207,52 @@ public class ExchangeWebSocketClient {
 
     // ------------------------------------------------------------------ frames
 
+    /**
+     * The exchange's wire format. Unknown fields are ignored so a new field upstream is not an
+     * outage here.
+     */
+    @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = true)
+    private record Frame(
+            String type,
+            String isin,
+            long sequence,
+            BigDecimal bid,
+            BigDecimal ask,
+            BigDecimal bidSize,
+            BigDecimal askSize,
+            String currency,
+            Instant timestamp,
+            String code,
+            String message) {}
+
     private void handleFrame(String payload, Consumer<Quote> onQuote, Runnable onIdle) {
-        JsonNode node;
+        Frame frame;
         try {
-            node = mapper.readTree(payload);
+            frame = mapper.readValue(payload, Frame.class);
         } catch (Exception e) {
             log.warn("Ignoring unparseable frame: {}", truncate(payload));
             return;
         }
-        switch (node.path("type").asText("quote")) {
-            case "quote" -> onQuote.accept(toQuote(node));
+        switch (frame.type() == null ? "quote" : frame.type()) {
+            case "quote" -> onQuote.accept(toQuote(frame));
             // The stall timer is already reset by the transport layer; the idle tick is what lets
             // a partial batch be written when the market goes quiet.
             case "heartbeat" -> onIdle.run();
-            case "error" -> log.error("Exchange reported {}: {}",
-                    node.path("code").asText("UNKNOWN"), node.path("message").asText());
-            default -> log.debug("Ignoring frame of unknown type: {}", truncate(payload));
+            case "error" -> log.error("Exchange reported {}: {}", frame.code(), frame.message());
+            default -> log.debug("Ignoring frame of unknown type: {}", frame.type());
         }
     }
 
-    private Quote toQuote(JsonNode node) {
+    private Quote toQuote(Frame frame) {
         return new Quote(
-                Isin.of(node.get("isin").asText()),
-                node.path("sequence").asLong(-1),
-                decimal(node, "bid"),
-                decimal(node, "ask"),
-                decimal(node, "bidSize"),
-                decimal(node, "askSize"),
-                node.path("currency").asText("USD"),
-                Instant.parse(node.get("timestamp").asText()),
+                Isin.of(frame.isin()),
+                frame.sequence(),
+                frame.bid(),
+                frame.ask(),
+                frame.bidSize(),
+                frame.askSize(),
+                frame.currency() == null ? "USD" : frame.currency(),
+                frame.timestamp(),
                 clock.instant());
     }
 
@@ -295,20 +312,8 @@ public class ExchangeWebSocketClient {
         }
     }
 
-    private static BigDecimal decimal(JsonNode node, String field) {
-        JsonNode value = node.get(field);
-        return value == null || value.isNull() ? null : new BigDecimal(value.asText());
-    }
-
     private static String truncate(String payload) {
         return payload.length() <= 200 ? payload : payload.substring(0, 200) + "...";
     }
 
-    private static String rootMessage(Throwable t) {
-        Throwable cause = t;
-        while (cause.getCause() != null && cause.getCause() != cause) {
-            cause = cause.getCause();
-        }
-        return cause.toString();
-    }
 }

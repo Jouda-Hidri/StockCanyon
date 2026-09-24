@@ -1,10 +1,13 @@
 package stockcanyon.consumption;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BinaryOperator;
+import java.util.stream.Collectors;
 
 import stockcanyon.Isin;
 import stockcanyon.Quote;
@@ -26,12 +29,13 @@ public final class QuoteBatch {
      * {@code ON CONFLICT DO UPDATE} touching one row twice in a command. History keeps every quote.
      */
     public static Collection<Quote> coalesceLatest(List<Quote> batch) {
-        Map<Isin, Quote> newest = new LinkedHashMap<>();
-        for (Quote quote : batch) {
-            newest.merge(quote.isin(), quote, (existing, incoming) ->
-                    incoming.isNewerThan(existing) ? incoming : existing);
-        }
-        return newest.values();
+        return batch.stream()
+                .collect(Collectors.toMap(
+                        Quote::isin,
+                        quote -> quote,
+                        BinaryOperator.maxBy(Quote.BY_RECENCY),
+                        LinkedHashMap::new))
+                .values();
     }
 
     /**
@@ -41,10 +45,10 @@ public final class QuoteBatch {
      * collide with themselves instead of conflicting harmlessly. Replay makes that routine.
      */
     public static List<Quote> dedupeByKey(List<Quote> batch) {
-        Map<String, Quote> unique = new LinkedHashMap<>(batch.size());
+        record Key(Isin isin, java.time.Instant eventTime, long sequence) {}
+        Map<Key, Quote> unique = new LinkedHashMap<>(batch.size());
         for (Quote quote : batch) {
-            unique.putIfAbsent(
-                    quote.isin().value() + '|' + quote.eventTime() + '|' + quote.sequence(), quote);
+            unique.putIfAbsent(new Key(quote.isin(), quote.eventTime(), quote.sequence()), quote);
         }
         return unique.size() == batch.size() ? batch : new ArrayList<>(unique.values());
     }
@@ -63,12 +67,6 @@ public final class QuoteBatch {
      * has to be the low-water mark — the highest instant below which nothing is still outstanding.
      */
     public static Quote highWaterMark(List<Quote> batch) {
-        Quote highest = batch.getFirst();
-        for (Quote quote : batch) {
-            if (quote.isNewerThan(highest)) {
-                highest = quote;
-            }
-        }
-        return highest;
+        return Collections.max(batch, Quote.BY_RECENCY);
     }
 }

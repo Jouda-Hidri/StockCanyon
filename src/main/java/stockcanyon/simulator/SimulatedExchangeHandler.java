@@ -1,6 +1,5 @@
 package stockcanyon.simulator;
 
-import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
@@ -19,6 +18,8 @@ import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
+import org.springframework.web.util.UriComponentsBuilder;
+import org.springframework.web.util.UriUtils;
 
 /**
  * Serves {@code /exchange/quotes?checkpoint_timestamp=}.
@@ -141,21 +142,17 @@ public class SimulatedExchangeHandler extends TextWebSocketHandler {
 
 
     private static String checkpointParameter(WebSocketSession session) {
-        var uri = session.getUri();
-        if (uri == null || uri.getQuery() == null) {
+        if (session.getUri() == null) {
             return null;
         }
-        for (String pair : uri.getQuery().split("&")) {
-            int equals = pair.indexOf('=');
-            String key = equals < 0 ? pair : pair.substring(0, equals);
-            if (!"checkpoint_timestamp".equals(key)) {
-                continue;
-            }
-            String value = equals < 0 ? ""
-                    : URLDecoder.decode(pair.substring(equals + 1), StandardCharsets.UTF_8);
-            return value.isBlank() || "null".equalsIgnoreCase(value) ? null : value;
+        String raw = UriComponentsBuilder.fromUri(session.getUri())
+                .build().getQueryParams().getFirst("checkpoint_timestamp");
+        if (raw == null || raw.isBlank()) {
+            return null;
         }
-        return null;
+        // getQueryParams() returns values still percent-encoded; decoding is a separate step.
+        String value = UriUtils.decode(raw, StandardCharsets.UTF_8);
+        return "null".equalsIgnoreCase(value) ? null : value;
     }
 
     private static Instant parseCheckpoint(String raw) {

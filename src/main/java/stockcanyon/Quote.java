@@ -55,15 +55,9 @@ public record Quote(
     }
 
     /**
-     * Whether this quote supersedes {@code other}: event time, with the sequence breaking ties.
-     *
-     * <p>The same rule the {@code latest_quote} upsert enforces in SQL.
+     * Total order over quotes: event time, sequence breaking ties. The same rule the
+     * {@code latest_quote} upsert enforces in SQL.
      */
-    public boolean isNewerThan(Quote other) {
-        if (other == null) {
-            return true;
-        }
-        int byTime = eventTime.compareTo(other.eventTime);
-        return byTime != 0 ? byTime > 0 : sequence > other.sequence;
-    }
+    public static final java.util.Comparator<Quote> BY_RECENCY =
+            java.util.Comparator.comparing(Quote::eventTime).thenComparingLong(Quote::sequence);
 }
