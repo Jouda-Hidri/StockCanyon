@@ -60,7 +60,6 @@ services:
       SERVER_PORT: "8099"
       MARKETDATA_ENABLED: "true"
       MARKETDATA_EXCHANGE_URL: "ws://exchange:8099/exchange/quotes"
-      MARKETDATA_CONSUMPTION_ENABLED: "true"
       MARKETDATA_DB_URL: "jdbc:postgresql://postgres:5432/marketdata"
       MARKETDATA_DB_USER: "marketdata"
       MARKETDATA_DB_PASSWORD: "marketdata"

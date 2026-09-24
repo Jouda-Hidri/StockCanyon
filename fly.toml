@@ -27,7 +27,6 @@ primary_region = "fra"
 [env]
   SERVER_PORT = "8099"
   MARKETDATA_ENABLED = "true"
-  MARKETDATA_CONSUMPTION_ENABLED = "true"
   MARKETDATA_SIMULATOR_ENABLED = "true"
   MARKETDATA_SIMULATOR_QPS = "100"
   MARKETDATA_EXCHANGE_URL = "ws://localhost:8099/exchange/quotes"
