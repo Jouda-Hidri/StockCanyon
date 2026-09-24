@@ -44,7 +44,9 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-      start_period: 60s
+      # Generous: a cold JVM start on a loaded machine has been seen to take over
+      # three minutes, and flapping unhealthy is worse than waiting.
+      start_period: 180s
     ports:
       - "8098:8099"
 
@@ -68,7 +70,9 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-      start_period: 60s
+      # Generous: a cold JVM start on a loaded machine has been seen to take over
+      # three minutes, and flapping unhealthy is worse than waiting.
+      start_period: 180s
     ports:
       - "8099:8099"
 
