@@ -513,6 +513,13 @@ database. Consumers updating the latest quote and the history then run independe
 Note the cost — appending to the log and advancing the exchange checkpoint are no longer one
 transaction, so that edge falls back to append-then-checkpoint plus idempotency.
 
+Why not Kafka *as* the database, given the schema is already Kafka-shaped (history = topic,
+latest_quote = compacted topic, checkpoint = __consumer_offsets)? Because the required API is a
+point read by key, and Kafka reads only by (partition, offset) — serving it means materializing a
+state store, i.e. rebuilding a database on top. And because a log cannot reject a duplicate: the
+whole prefer-duplicates recovery strategy stays cheap only while the store is idempotent via the
+primary key. Kafka enters as the log beside the database, never instead of it.
+
 A cheaper step usually comes first: the two writes have opposite requirements and need not share a
 transaction. `latest_quote` is small, must be fresh, and coalescing already makes it scale with the
 number of instruments rather than the quote rate. `quote` history is enormous and nothing reads it
