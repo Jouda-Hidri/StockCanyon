@@ -64,14 +64,4 @@ public class SequenceTracker {
         return lastSequence;
     }
 
-    /**
-     * Forgets the position, so the next message is treated as a first.
-     *
-     * <p>Used when resuming a feed that cannot replay: the stream restarts at the live edge, so the
-     * discontinuity there is already known and separately recorded, and comparing across it would
-     * only report it a second time as an enormous spurious gap.
-     */
-    public void reset() {
-        lastSequence = -1;
-    }
 }

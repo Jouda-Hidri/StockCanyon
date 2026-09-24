@@ -488,7 +488,6 @@ rate-limit or make idempotent.
 | `consumption.flush-interval` | 200ms | Latency/throughput dial — bounds staleness, sets how much a commit amortises |
 | `consumption.stall-timeout` | 15s | Must exceed the heartbeat interval, or a quiet market reads as a dead socket |
 | `consumption.reconnect-delay` | 1s | Fixed wait between reconnect attempts |
-| `consumption.enabled` | true | Off on read replicas, so exactly one process writes |
 | `simulator.skew` | 1.1 | Zipf exponent — busiest instrument ~100x the quietest |
 
 ---
@@ -604,6 +603,7 @@ curl -s localhost:8099/api/v1/marketdata/status | jq '.feed.quotesMissing'   # 0
 `pause` sends `SIGSTOP`, so the socket stays **open and silent** rather than closing — which exercises
 failure mode (b) above, the one only the stall timer catches.
 
-Measured on that stack: sequence advanced 8469 -> 18289 across a 20-second outage (9 820 messages
-issued while disconnected), and the consumer stored 9 821 — every one of them, plus a single boundary
-duplicate. `quotesMissing = 0`, stored sequences contiguous.
+Measured on that stack: across a 20-second outage the consumer's position advanced 28 060 -> 36 018
+— 7 958 messages it was disconnected for — with `quotesMissing = 0` and 20 duplicates discarded,
+which is what shows it returned through the replay path rather than at the live edge. The stored
+sequences were contiguous end to end: 72 913 rows, 72 913 distinct, span 72 913.

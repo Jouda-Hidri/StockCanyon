@@ -91,11 +91,11 @@ class MarketDataRecoveryTest {
                 .pollInterval(Duration.ofMillis(100))
                 .until(() -> consumer.status().quotesConsumed() > consumedBefore + 1_000);
 
-        await("the pending batch to be written")
-                .atMost(Duration.ofSeconds(15))
-                .pollInterval(Duration.ofMillis(100))
-                .until(() -> consumer.status().pendingQuotes() == 0);
 
+        // No wait for the batch to drain: contiguity is an invariant, not a quiescent state.
+        // Committed rows are always a contiguous prefix, because batches commit in sequence order
+        // and a failed one leaves the checkpoint behind it. Waiting on pending == 0 would also be
+        // racy — quotes arrive continuously, so it is only briefly true between flushes.
         QuoteConsumer.ConsumptionStatus status = consumer.status();
 
         assertThat(status.quotesMissing())
@@ -136,9 +136,6 @@ class MarketDataRecoveryTest {
                 .atMost(Duration.ofSeconds(30))
                 .pollInterval(Duration.ofMillis(100))
                 .until(() -> consumer.status().quotesConsumed() > 2_000);
-        await("the pending batch to be written")
-                .atMost(Duration.ofSeconds(15))
-                .until(() -> consumer.status().pendingQuotes() == 0);
 
         Map<String, Long> after = latestSequencesByIsin();
 

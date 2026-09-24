@@ -1,10 +1,13 @@
 package stockcanyon.simulator;
 
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.socket.config.annotation.EnableWebSocket;
 import org.springframework.web.socket.config.annotation.WebSocketConfigurer;
 import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry;
+
+import stockcanyon.MarketDataProperties;
 
 /**
  * Publishes the simulated exchange at {@code /exchange/quotes}.
@@ -15,6 +18,9 @@ import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry
  */
 @Configuration
 @EnableWebSocket
+// Registers the properties itself: the exchange runs with marketdata.enabled=false, so it cannot
+// rely on MarketDataConfig having done it.
+@EnableConfigurationProperties(MarketDataProperties.class)
 @ConditionalOnProperty(prefix = "marketdata.simulator", name = "enabled", havingValue = "true")
 public class SimulatorConfig implements WebSocketConfigurer {
 

@@ -35,10 +35,13 @@ curl -s localhost:8099/api/v1/marketdata/quotes/US0378331005/latest | jq
 curl -s localhost:8099/api/v1/marketdata/status | jq
 ```
 
-Requires Java 21 and Docker. To run without Compose you need a PostgreSQL to point at:
+Requires Java 21 and Docker. To run without Compose, point it at a PostgreSQL of your own — the
+defaults expect `marketdata/marketdata` on `localhost:5432`:
 
 ```sh
-./gradlew bootRun --args='--marketdata.simulator.enabled=true'
+./gradlew bootRun --args='
+  --marketdata.simulator.enabled=true
+  --marketdata.database.url=jdbc:postgresql://localhost:5432/marketdata'
 ```
 
 ---
@@ -74,9 +77,10 @@ curl -s localhost:8099/api/v1/marketdata/status | jq '.feed.quotesMissing'   # 0
 `pause` sends `SIGSTOP`, so the socket stays **open and silent** rather than closing — the hardest
 of the three failure modes, and the only one a stall timer can catch.
 
-Measured on that stack: sequence advanced 8469 → 18289 across a 20-second outage (9 820 messages
-issued while disconnected) and the consumer stored 9 821 — every one of them, plus a single
-boundary duplicate.
+Measured on that stack: across a 20-second outage the consumer's position advanced 28 060 → 36 018
+— 7 958 messages it was disconnected for — with `quotesMissing = 0`, 20 duplicates discarded
+(proof it came back through the replay path), and the stored sequences contiguous end to end
+(72 913 rows, 72 913 distinct, span 72 913).
 
 ---
 

@@ -59,13 +59,4 @@ class SequenceTrackerTest {
         assertThat(tracker.observe(21).verdict()).isEqualTo(Verdict.IN_ORDER);
     }
 
-    @Test
-    @DisplayName("reset makes the next message a first rather than an enormous gap")
-    void resetSuppressesTheKnownDiscontinuity() {
-        SequenceTracker tracker = new SequenceTracker();
-        tracker.observe(10);
-        tracker.reset();
-
-        assertThat(tracker.observe(9_000_000).verdict()).isEqualTo(Verdict.FIRST);
-    }
 }

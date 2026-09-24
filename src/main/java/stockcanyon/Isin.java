@@ -9,7 +9,7 @@ import org.apache.commons.validator.routines.ISINValidator;
  * but names a different instrument, or none. Caught here it is a 400; uncaught it is a silent
  * miss, or quotes filed against the wrong security.
  */
-public record Isin(String value) implements Comparable<Isin> {
+public record Isin(String value) {
 
     /** {@code false}: check the format and the ISO 6166 check digit, not the country registry. */
     private static final ISINValidator VALIDATOR = ISINValidator.getInstance(false);
@@ -33,10 +33,6 @@ public record Isin(String value) implements Comparable<Isin> {
         return value != null && VALIDATOR.isValid(value.trim().toUpperCase());
     }
 
-    @Override
-    public int compareTo(Isin other) {
-        return value.compareTo(other.value);
-    }
 
     @Override
     public String toString() {
