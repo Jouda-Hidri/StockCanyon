@@ -432,6 +432,13 @@ read an old value and both conclude they are newer.
 Plain JDBC rather than JPA: the two operations that matter are a multi-row insert that ignores
 conflicts and a conditional upsert, both things an ORM gets in the way of.
 
+Why Postgres and not a document store, given there are no joins? Because joins were never the
+criterion — atomicity scope is. The invariant spans three tables in one transaction; MongoDB's
+natural atomicity unit is one document, and its multi-document transactions are the exception path
+(snapshot isolation, WriteConflict retries) that we would be running on every flush. The guarded
+upsert is also native here, where Mongo's filter-plus-upsert has a documented duplicate-key race.
+And the data is maximally relational: fixed columns, flat, no nesting — there is no document.
+
 ---
 
 ## 10. Distribution
