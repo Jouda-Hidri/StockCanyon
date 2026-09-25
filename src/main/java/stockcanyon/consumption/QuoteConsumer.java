@@ -160,19 +160,23 @@ public class QuoteConsumer implements SmartLifecycle {
 
         List<Quote> unique = QuoteBatch.dedupeByKey(batch);
         Collection<Quote> coalesced = QuoteBatch.coalesceLatest(unique);
-        Quote highWater = QuoteBatch.highWaterMark(unique);
+        Quote newest = QuoteBatch.highWaterMark(unique);
+        // The end of the contiguous run, which may lag the newest quote if a hole is open.
+        SequenceTracker.Position safe = sequences.safePosition();
         Instant now = clock.instant();
 
         transactions.executeWithoutResult(status -> {
             quotes.insertHistory(unique);
             quotes.upsertLatest(coalesced, now);
-            // Same transaction: the position is only true once the data above is.
-            checkpoints.save(highWater.eventTime(), highWater.sequence(), now);
+            // Same transaction: the position is only true once the data above is. And it is the
+            // contiguous prefix, not the newest quote — resuming from the newest would step over
+            // an open hole and make a detected gap permanent.
+            checkpoints.save(safe.eventTime(), safe.sequence(), now);
         });
 
         consumed.addAndGet(unique.size());
-        lastQuoteAt = highWater.eventTime();
-        lastLag = highWater.ingestionLag();
+        lastQuoteAt = newest.eventTime();
+        lastLag = newest.ingestionLag();
         // Timed from the end of the write, not the start. Measured from the start, a write slower
         // than the flush interval leaves every subsequent quote already overdue, so each one
         // flushes a batch of itself — which makes writes slower still.
@@ -182,7 +186,8 @@ public class QuoteConsumer implements SmartLifecycle {
     /** Counts duplicates and gaps. See {@link SequenceTracker}. */
     private void inspectSequences(List<Quote> batch) {
         for (Quote quote : batch) {
-            SequenceTracker.Observation observation = sequences.observe(quote.sequence());
+            SequenceTracker.Observation observation =
+                    sequences.observe(quote.sequence(), quote.eventTime());
             switch (observation.verdict()) {
                 case DUPLICATE -> duplicates.incrementAndGet();
                 case GAP -> {

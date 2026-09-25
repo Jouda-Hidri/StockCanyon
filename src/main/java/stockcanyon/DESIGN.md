@@ -238,8 +238,23 @@ incrementing by exactly one. A hole is proof of loss; no hole is proof there was
         +---------------------+---------------------+
 ```
 
-A `DUPLICATE` must **not** move the high-water mark backwards. If it did, the next genuine gap would
-be measured from the rewound position and reported as far larger than it was.
+The checkpoint is the **contiguous prefix**, not the newest sequence seen. Given 40, 41, 43 the safe
+position is 41 — resuming there makes the exchange replay 42 and 43, and the primary key discards
+43 as a duplicate. Checkpointing 43 would detect the hole and then make it permanent, because
+nothing would ever ask for 42 again. Quotes are still written as they arrive; only the position
+lags.
+
+```
+   received:   40  41  __  43  44
+                       ^
+                       hole
+   written:    40  41      43  44     all of it -- idempotent
+   checkpoint: 41                     resume here, replay 42..44
+```
+
+The prefix needs a bound. If the exchange ever legitimately skips a number, a strict rule stalls
+forever: the position never passes the hole, every reconnect replays more, and the held-ahead set
+grows without limit. After 10 000 pending sequences the hole is written off and recorded.
 
 `quotesMissing` on `GET /status` is that count. It is the number that answers the requirement.
 
