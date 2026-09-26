@@ -8,6 +8,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -40,6 +41,7 @@ public class SimulatedExchangeHandler extends TextWebSocketHandler {
     private final Clock clock;
     private final Map<String, WebSocketSession> sessions = new ConcurrentHashMap<>();
     private final Map<String, Thread> pumps = new ConcurrentHashMap<>();
+    private final AtomicInteger toSkip = new AtomicInteger();
 
     public SimulatedExchangeHandler(QuoteLog quoteLog, ObjectMapper mapper, Clock clock) {
         this.quoteLog = quoteLog;
@@ -81,6 +83,9 @@ public class SimulatedExchangeHandler extends TextWebSocketHandler {
                     continue;
                 }
                 for (ExchangeMessage message : batch.messages()) {
+                    if (toSkip.getAndUpdate(n -> n > 0 ? n - 1 : 0) > 0) {
+                        continue;
+                    }
                     send(session, message);
                 }
                 cursor = batch.nextCursor();
@@ -140,6 +145,16 @@ public class SimulatedExchangeHandler extends TextWebSocketHandler {
         return dropped;
     }
 
+    /**
+     * Silently skips the next {@code count} live messages, as a lossy link would, while keeping them
+     * in the log so a replay still delivers them.
+     *
+     * <p>Fault injection for the one failure the socket cannot report: a hole in the sequence with
+     * the connection perfectly healthy.
+     */
+    public void skipNext(int count) {
+        toSkip.addAndGet(count);
+    }
 
     private static String checkpointParameter(WebSocketSession session) {
         if (session.getUri() == null) {

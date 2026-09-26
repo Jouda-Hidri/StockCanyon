@@ -26,7 +26,9 @@ final class SharedPostgres {
         INSTANCE = new PostgreSQLContainer<>("postgres:16-alpine")
                 .withDatabaseName("marketdata")
                 .withUsername("marketdata")
-                .withPassword("marketdata");
+                .withPassword("marketdata")
+                // Logical decoding, so tests can read what the outbox put in the WAL.
+                .withCommand("postgres", "-c", "wal_level=logical");
         INSTANCE.start();
     }
 

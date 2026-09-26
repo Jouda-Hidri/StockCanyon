@@ -1,19 +1,30 @@
-# The market data service, its database, and a stand-in for the Stock Exchange.
+# The two market data services, their datastores, the pipe between them, and a stand-in for the
+# Stock Exchange.
 #
 #   docker compose up --build
 #
-# Three containers, two of them the same image. `exchange` publishes the feed and `marketdata`
-# consumes it, which keeps the consumer talking to something across a real network connection —
-# one that Compose can sever, so the recovery path can be demonstrated rather than described:
+#   exchange ──ws──▶ ingestion ──▶ postgres (quote_history, checkpoint, outbox)
+#                                     │ WAL
+#                                     ▼
+#                                  connect (Debezium) ──▶ kafka: marketdata.latest-quote
+#                                                                   │
+#                          redis (latest quote) ◀── distribution ◀──┘
+#                                                       │
+#                              GET /api/v1/marketdata/quotes/{isin}/latest  (port 8099)
+#
+# One datastore per service: ingestion owns PostgreSQL, distribution owns Redis, and neither reads
+# the other's. The only link is the outbox, which Debezium publishes to Kafka.
+#
+# The recovery path can be demonstrated rather than described:
 #
 #   docker compose pause exchange && sleep 20 && docker compose unpause exchange
-#   curl -s localhost:8099/api/v1/marketdata/status | jq '.feed.quotesMissing'
-#
-# The answer must be 0. Everything the design does is in service of that.
+#   curl -s localhost:8100/api/v1/marketdata/status | jq '.feed.quotesMissing'    # 0
 
 services:
   postgres:
     image: postgres:16-alpine
+    # Logical decoding, for Debezium to read the outbox from the write-ahead log.
+    command: ["postgres", "-c", "wal_level=logical"]
     environment:
       POSTGRES_DB: marketdata
       POSTGRES_USER: marketdata
@@ -30,17 +41,93 @@ services:
     ports:
       - "55432:5432"
 
+  kafka:
+    image: apache/kafka:4.3.1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Topics are created on purpose, never as a side effect of a client asking for one: an
+      # auto-created latest-quote topic would get cleanup.policy=delete instead of compact.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      # The check starts a JVM; on a loaded machine that alone has taken over ten seconds.
+      interval: 10s
+      timeout: 45s
+      retries: 30
+
+  # Kafka Connect running Debezium. Reads the outbox from PostgreSQL's WAL and publishes one message
+  # per outbox row to marketdata.latest-quote, keyed by ISIN.
+  connect:
+    image: quay.io/debezium/connect:3.6.3.Final
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: marketdata-connect
+      CONFIG_STORAGE_TOPIC: connect-configs
+      OFFSET_STORAGE_TOPIC: connect-offsets
+      STATUS_STORAGE_TOPIC: connect-status
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_PLUGIN_DISCOVERY: service_load
+    # The image bundles a dozen connectors, and scanning them all has taken over three minutes.
+    # Only PostgreSQL is needed.
+    entrypoint: ["bash", "-c", "find /kafka/connect -mindepth 1 -maxdepth 1 ! -name debezium-connector-postgres -exec rm -rf {} + && exec /docker-entrypoint.sh start"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8083/connectors > /dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+    ports:
+      - "8083:8083"
+
+  # Registers the outbox connector once the outbox table exists, which the ingestion service's
+  # migrations create. PUT is idempotent, so a re-run changes nothing.
+  connect-init:
+    image: curlimages/curl:8.16.0
+    depends_on:
+      connect:
+        condition: service_healthy
+      ingestion:
+        condition: service_healthy
+    volumes:
+      - ./deploy/compose/marketdata-outbox-connector.json:/connector.json:ro
+    command: ["-fsS", "-X", "PUT", "-H", "Content-Type: application/json",
+              "--data", "@/connector.json",
+              "http://connect:8083/connectors/marketdata-outbox/config"]
+    restart: "no"
+
+  redis:
+    image: redis:7.4-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   # Plays the Stock Exchange: serves /exchange/quotes?checkpoint_timestamp= and publishes a
   # Zipf-skewed quote stream. Consumes nothing and needs no database.
   exchange:
     build: .
     environment:
       SERVER_PORT: "8099"
-      MARKETDATA_ENABLED: "false"
+      MARKETDATA_CONSUMPTION_ENABLED: "false"
+      MARKETDATA_DISTRIBUTION_ENABLED: "false"
       MARKETDATA_SIMULATOR_ENABLED: "true"
       MARKETDATA_SIMULATOR_QPS: "200"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8099/actuator/health || exit 1"]
+    healthcheck: &health
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8099/actuator/health/readiness || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -50,8 +137,9 @@ services:
     ports:
       - "8098:8099"
 
-  # Consumes the feed, stores it, and serves the API.
-  marketdata:
+  # The ingestion service: consumes the feed, writes history + checkpoint + outbox. Serves only its
+  # own status.
+  ingestion:
     build: .
     depends_on:
       postgres:
@@ -60,19 +148,31 @@ services:
         condition: service_healthy
     environment:
       SERVER_PORT: "8099"
-      MARKETDATA_ENABLED: "true"
+      MARKETDATA_CONSUMPTION_ENABLED: "true"
+      MARKETDATA_DISTRIBUTION_ENABLED: "false"
       MARKETDATA_EXCHANGE_URL: "ws://exchange:8099/exchange/quotes"
       MARKETDATA_DB_URL: "jdbc:postgresql://postgres:5432/marketdata"
       MARKETDATA_DB_USER: "marketdata"
       MARKETDATA_DB_PASSWORD: "marketdata"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8099/actuator/health || exit 1"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-      # Generous: a cold JVM start on a loaded machine has been seen to take over
-      # three minutes, and flapping unhealthy is worse than waiting.
-      start_period: 180s
+    healthcheck: *health
+    ports:
+      - "8100:8099"
+
+  # The distribution service: projects the topic into Redis and serves the API. No database.
+  distribution:
+    build: .
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: "8099"
+      MARKETDATA_CONSUMPTION_ENABLED: "false"
+      MARKETDATA_DISTRIBUTION_ENABLED: "true"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      REDIS_HOST: "redis"
+    healthcheck: *health
     ports:
       - "8099:8099"
 

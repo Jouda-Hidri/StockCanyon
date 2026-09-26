@@ -1,0 +1,57 @@
+# The simulated Stock Exchange, for a demo cluster. Delete this file, and point
+# MARKETDATA_EXCHANGE_URL in ingest.yaml at the real feed, for anything else.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exchange
+  labels:
+    app.kubernetes.io/name: exchange
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: exchange
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: exchange
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: exchange
+          image: stockcanyon
+          env:
+            - name: SERVER_PORT
+              value: "8099"
+            - name: MARKETDATA_CONSUMPTION_ENABLED
+              value: "false"
+            - name: MARKETDATA_DISTRIBUTION_ENABLED
+              value: "false"
+            - name: MARKETDATA_SIMULATOR_ENABLED
+              value: "true"
+            - name: MARKETDATA_SIMULATOR_QPS
+              value: "200"
+          ports:
+            - name: http
+              containerPort: 8099
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: http }
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { memory: 512Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: exchange
+spec:
+  selector:
+    app.kubernetes.io/name: exchange
+  ports:
+    - name: http
+      port: 8099
+      targetPort: http

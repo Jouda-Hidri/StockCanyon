@@ -1,0 +1,32 @@
+{
+  "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+  "tasks.max": "1",
+
+  "database.hostname": "postgres",
+  "database.port": "5432",
+  "database.user": "marketdata",
+  "database.password": "marketdata",
+  "database.dbname": "marketdata",
+  "topic.prefix": "marketdata",
+
+  "plugin.name": "pgoutput",
+  "publication.name": "marketdata_outbox",
+  "publication.autocreate.mode": "disabled",
+  "slot.name": "marketdata_outbox",
+  "table.include.list": "public.outbox",
+  "snapshot.mode": "no_data",
+  "tombstones.on.delete": "false",
+  "heartbeat.interval.ms": "10000",
+
+  "transforms": "outbox",
+  "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
+  "transforms.outbox.route.topic.replacement": "marketdata.latest-quote",
+  "transforms.outbox.table.expand.json.payload": "false",
+
+  "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+  "value.converter": "org.apache.kafka.connect.storage.StringConverter",
+
+  "topic.creation.default.partitions": "6",
+  "topic.creation.default.replication.factor": "1",
+  "topic.creation.default.cleanup.policy": "compact"
+}

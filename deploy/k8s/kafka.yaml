@@ -1,0 +1,163 @@
+# Kafka, Kafka Connect with Debezium, the latest-quote topic and the outbox connector, run by
+# Strimzi (1.2, API kafka.strimzi.io/v1).
+#
+#   ingestion DB ──WAL──▶ marketdata-connect (Debezium) ──▶ marketdata.latest-quote ──▶ distribution
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: marketdata-kafka
+  labels:
+    strimzi.io/cluster: marketdata-kafka
+spec:
+  replicas: 3
+  roles:
+    - controller
+    - broker
+  storage:
+    type: jbod
+    volumes:
+      - id: 0
+        type: persistent-claim
+        size: 50Gi
+        kraftMetadata: shared
+---
+apiVersion: kafka.strimzi.io/v1
+kind: Kafka
+metadata:
+  name: marketdata-kafka
+spec:
+  kafka:
+    version: 4.3.1
+    metadataVersion: 4.3-IV0
+    listeners:
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+    config:
+      offsets.topic.replication.factor: 3
+      transaction.state.log.replication.factor: 3
+      transaction.state.log.min.isr: 2
+      default.replication.factor: 3
+      # An acknowledged event is on two brokers, so losing one loses nothing.
+      min.insync.replicas: 2
+      # Topics are created on purpose (KafkaTopic below), never by a client asking for one: an
+      # auto-created latest-quote topic would be cleanup.policy=delete, not compact.
+      auto.create.topics.enable: false
+  entityOperator:
+    topicOperator: {}
+    userOperator: {}
+---
+# The contract between the two services. Compacted: Kafka keeps at least the last message per key
+# (ISIN), so the topic itself holds every instrument's latest quote indefinitely, and a new or
+# wiped distribution store rebuilds by reading it from the start.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: marketdata.latest-quote
+  labels:
+    strimzi.io/cluster: marketdata-kafka
+spec:
+  partitions: 12
+  replicas: 3
+  config:
+    cleanup.policy: compact
+    min.insync.replicas: 2
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaConnect
+metadata:
+  name: marketdata-connect
+  annotations:
+    # Connectors are declared as KafkaConnector resources, not POSTed to the REST API.
+    strimzi.io/use-connector-resources: "true"
+spec:
+  version: 4.3.1
+  # Two workers: if one dies, the connector's single task is rescheduled on the other.
+  replicas: 2
+  bootstrapServers: marketdata-kafka-kafka-bootstrap:9092
+  groupId: marketdata-connect
+  configStorageTopic: marketdata-connect-configs
+  offsetStorageTopic: marketdata-connect-offsets
+  statusStorageTopic: marketdata-connect-status
+  config:
+    config.storage.replication.factor: -1
+    offset.storage.replication.factor: -1
+    status.storage.replication.factor: -1
+    # Lets the connector read database credentials from a Secret instead of holding them in its
+    # config. Needs the Role below.
+    config.providers: secrets
+    config.providers.secrets.class: io.strimzi.kafka.KubernetesSecretConfigProvider
+  build:
+    output:
+      type: docker
+      # Strimzi builds an image with the Debezium plugin and pushes it here. Use your registry.
+      image: ghcr.io/your-org/marketdata-connect:3.6.3
+      # pushSecret: registry-credentials
+    plugins:
+      - name: debezium-postgres
+        artifacts:
+          - type: tgz
+            url: https://repo1.maven.org/maven2/io/debezium/debezium-connector-postgres/3.6.3.Final/debezium-connector-postgres-3.6.3.Final-plugin.tar.gz
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: marketdata-connect-secrets
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["marketdata-db-debezium"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: marketdata-connect-secrets
+subjects:
+  - kind: ServiceAccount
+    name: marketdata-connect-connect
+roleRef:
+  kind: Role
+  name: marketdata-connect-secrets
+  apiGroup: rbac.authorization.k8s.io
+---
+# The outbox connector. Same settings as deploy/compose/marketdata-outbox-connector.json (which the
+# end-to-end test runs), except: the primary's Service, credentials from a Secret, a failover slot,
+# and no topic creation, since the KafkaTopic above owns the topic.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaConnector
+metadata:
+  name: marketdata-outbox
+  labels:
+    strimzi.io/cluster: marketdata-connect
+spec:
+  class: io.debezium.connector.postgresql.PostgresConnector
+  # One task: a PostgreSQL replication slot is read by one reader, in commit order.
+  tasksMax: 1
+  config:
+    database.hostname: marketdata-db-rw
+    database.port: "5432"
+    database.user: ${secrets:marketdata/marketdata-db-debezium:username}
+    database.password: ${secrets:marketdata/marketdata-db-debezium:password}
+    database.dbname: marketdata
+    topic.prefix: marketdata
+
+    plugin.name: pgoutput
+    publication.name: marketdata_outbox
+    publication.autocreate.mode: disabled
+    slot.name: marketdata_outbox
+    # PostgreSQL 17 failover slot, kept on the standbys by CloudNativePG (postgres.yaml).
+    slot.failover: "true"
+    table.include.list: public.outbox
+    snapshot.mode: no_data
+    tombstones.on.delete: "false"
+    heartbeat.interval.ms: "10000"
+
+    transforms: outbox
+    transforms.outbox.type: io.debezium.transforms.outbox.EventRouter
+    transforms.outbox.route.topic.replacement: marketdata.latest-quote
+    transforms.outbox.table.expand.json.payload: "false"
+
+    key.converter: org.apache.kafka.connect.storage.StringConverter
+    value.converter: org.apache.kafka.connect.storage.StringConverter
