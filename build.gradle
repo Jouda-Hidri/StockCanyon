@@ -37,10 +37,21 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-jdbc'
     implementation 'org.flywaydb:flyway-core'
     implementation 'org.flywaydb:flyway-database-postgresql'
-    runtimeOnly 'org.postgresql:postgresql'
+    // Compile scope, not runtime: the history write uses the driver's COPY API directly.
+    implementation 'org.postgresql:postgresql'
 
-    // So consumption lag is observable from outside the process.
+    // The distribution service's own datastore, and the topic that feeds it. The consumption
+    // service owns PostgreSQL; neither reads the other's store.
+    implementation 'org.springframework.boot:spring-boot-starter-data-redis'
+    implementation 'org.springframework.kafka:spring-kafka'
+
+    // Health, and every metric the service emits, scraped by Prometheus.
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'io.micrometer:micrometer-registry-prometheus'
+
+    // Leader election for ingestion: a lock row in the same PostgreSQL the data lives in, so it
+    // works identically under Kubernetes, Compose and the tests, and needs no RBAC.
+    implementation 'org.springframework.integration:spring-integration-jdbc'
 
     // ISIN validation, check digit included. Writing the ISO 6166 Luhn variant by hand is about
     // forty lines of something a library already gets right.
@@ -59,6 +70,7 @@ dependencies {
     // verifying a different system.
     testImplementation 'org.testcontainers:junit-jupiter'
     testImplementation 'org.testcontainers:postgresql'
+    testImplementation 'org.testcontainers:kafka'
     testImplementation 'org.awaitility:awaitility'
 }
 

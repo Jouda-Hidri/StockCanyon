@@ -1,37 +1,45 @@
 package stockcanyon;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.awaitility.Awaitility.await;
 
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.net.ServerSocket;
-import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.context.ApplicationContext;
 import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
-import stockcanyon.consumption.QuoteConsumer;
+import stockcanyon.distribution.LatestQuoteEvent;
+import stockcanyon.distribution.LatestQuoteStore;
 
 /**
- * Covers data distribution. Driven over HTTP, because what is checked — status codes, the ISIN
- * parsed from a path variable — only exists once a request has been through the whole stack.
+ * The distribution service on its own: Redis and the API, no database and no feed.
+ *
+ * <p>Redis is seeded directly, as the Kafka projection would; {@code OutboxEndToEndTest} covers
+ * the path that fills it in production. Driven over HTTP, because what is checked — status codes,
+ * the ISIN parsed from a path variable — only exists once a request has been through the stack.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
 class MarketDataApiTest {
 
     private static final String AAPL = "US0378331005";
 
-    /** Valid ISIN (Toyota), but outside the exchange's universe, so nothing is ever stored for it. */
+    /** Valid ISIN (Toyota), never seeded. */
     private static final String NEVER_QUOTED = "JP3633400001";
 
     private static final int PORT = freePort();
@@ -39,34 +47,37 @@ class MarketDataApiTest {
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
         registry.add("server.port", () -> PORT);
-        registry.add("marketdata.enabled", () -> true);
-        registry.add("marketdata.exchange-url", () -> "ws://localhost:" + PORT + "/exchange/quotes");
-        registry.add("marketdata.simulator.enabled", () -> true);
-        registry.add("marketdata.simulator.quotes-per-second", () -> 400);
-        registry.add("marketdata.database.url", () -> SharedPostgres.jdbcUrlFor("api_test"));
-        registry.add("marketdata.database.username", SharedPostgres.INSTANCE::getUsername);
-        registry.add("marketdata.database.password", SharedPostgres.INSTANCE::getPassword);
-        registry.add("marketdata.consumption.flush-interval", () -> "50ms");
+        registry.add("marketdata.consumption.enabled", () -> false);
+        registry.add("marketdata.distribution.enabled", () -> true);
+        registry.add("spring.data.redis.host", SharedRedis.INSTANCE::getHost);
+        registry.add("spring.data.redis.port", SharedRedis::port);
+        // No Kafka here: the projector is not under test.
+        registry.add("spring.kafka.listener.auto-startup", () -> false);
     }
 
     @Autowired
     TestRestTemplate http;
 
     @Autowired
-    QuoteConsumer consumer;
+    LatestQuoteStore store;
 
-    private void awaitQuotes() {
-        await("the feed to deliver quotes")
-                .atMost(Duration.ofSeconds(30))
-                .pollInterval(Duration.ofMillis(100))
-                .until(() -> consumer.status().quotesConsumed() > 500);
+    @Autowired
+    StringRedisTemplate redis;
+
+    @Autowired
+    ApplicationContext context;
+
+    @BeforeEach
+    void seed() {
+        redis.getConnectionFactory().getConnection().serverCommands().flushDb();
+        Instant now = Instant.now();
+        store.apply(List.of(new LatestQuoteEvent(AAPL, "USD", new BigDecimal("225.96040000"),
+                new BigDecimal("226.05080000"), BigDecimal.TEN, BigDecimal.ONE, 21457, now, now)));
     }
 
     @Test
-    @DisplayName("the latest quote is served by ISIN")
+    @DisplayName("the latest quote is served by ISIN, from Redis")
     void latestByIsin() {
-        awaitQuotes();
-
         ResponseEntity<Map<String, Object>> response = http.exchange(
                 url("/quotes/" + AAPL + "/latest"), HttpMethod.GET, null,
                 new ParameterizedTypeReference<Map<String, Object>>() {});
@@ -76,8 +87,8 @@ class MarketDataApiTest {
         assertThat(body).isNotNull();
         assertThat(body.get("isin")).isEqualTo(AAPL);
         assertThat(body.get("currency")).isEqualTo("USD");
+        assertThat(((Number) body.get("sequence")).longValue()).isEqualTo(21457);
         assertThat(body).containsKeys("bid", "ask", "mid", "sequence", "eventTime", "ageMillis");
-        // A price that arrived seconds ago must not be reported as hours old.
         assertThat(((Number) body.get("ageMillis")).longValue()).isLessThan(60_000);
     }
 
@@ -88,35 +99,36 @@ class MarketDataApiTest {
     @Test
     @DisplayName("a malformed ISIN is rejected, a merely unknown one is not found")
     void distinguishesMalformedFromUnknown() {
-        awaitQuotes();
-
         // Apple's ISIN with the check digit changed: right shape, wrong identifier.
         assertThat(http.getForEntity(url("/quotes/US0378331006/latest"), String.class).getStatusCode())
                 .isEqualTo(HttpStatus.BAD_REQUEST);
-
         assertThat(http.getForEntity(url("/quotes/NOTANISIN/latest"), String.class).getStatusCode())
                 .isEqualTo(HttpStatus.BAD_REQUEST);
-
         assertThat(http.getForEntity(url("/quotes/" + NEVER_QUOTED + "/latest"), String.class)
                 .getStatusCode())
                 .isEqualTo(HttpStatus.NOT_FOUND);
     }
 
     @Test
-    @DisplayName("status reports consumption state, including whether anything was missed")
-    @SuppressWarnings("unchecked")
-    void statusReportsConsumption() {
-        awaitQuotes();
+    @DisplayName("an unreachable store is 503 with Retry-After, not 500")
+    void storeDownIsRetryable() {
+        SharedRedis.INSTANCE.getDockerClient().pauseContainerCmd(SharedRedis.INSTANCE.getContainerId()).exec();
+        try {
+            ResponseEntity<String> response = http.getForEntity(url("/quotes/" + AAPL + "/latest"), String.class);
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+            assertThat(response.getHeaders().getFirst("Retry-After")).isEqualTo("1");
+        } finally {
+            SharedRedis.INSTANCE.getDockerClient().unpauseContainerCmd(SharedRedis.INSTANCE.getContainerId()).exec();
+        }
+    }
 
-        Map<String, Object> body = http.getForObject(url("/status"), Map.class);
-
-        assertThat(body).isNotNull();
-        assertThat(body.get("consuming")).isEqualTo(true);
-        assertThat(((Number) body.get("storedQuotes")).longValue()).isPositive();
-
-        Map<String, Object> feed = (Map<String, Object>) body.get("feed");
-        assertThat(feed.get("connected")).isEqualTo(true);
-        assertThat(((Number) feed.get("quotesMissing")).longValue()).isZero();
+    /** One datastore per service: the distribution service must not even be able to reach PostgreSQL. */
+    @Test
+    @DisplayName("the distribution service has no database and no consumption endpoints")
+    void ownsOnlyRedis() {
+        assertThat(context.getBeanNamesForType(javax.sql.DataSource.class)).isEmpty();
+        assertThat(http.getForEntity(url("/status"), String.class).getStatusCode())
+                .isEqualTo(HttpStatus.NOT_FOUND);
     }
 
     private static String url(String path) {

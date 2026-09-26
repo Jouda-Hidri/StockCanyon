@@ -1,0 +1,85 @@
+# The ingestion service's database: quote_history, checkpoint, election, outbox.
+# Highly available: one primary, two standbys, automatic failover, run by CloudNativePG.
+#
+# The application connects to the `marketdata-db-rw` Service, which the operator always points at
+# the current primary. On failover a standby is promoted and the Service moves; in-flight
+# transactions fail, the writer retries them with backoff, and the retry lands on the new primary.
+#
+# Synchronous replication is not optional here. The consumer keeps its sequence position in memory
+# and trusts a COMMIT: with asynchronous replication a failover can discard the last few committed
+# batches while the consumer carries on past them, and the next checkpoint it writes steps over a
+# hole it never saw. With one synchronous standby, "committed" means "on two machines", and the
+# operator only promotes a standby that has it.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: marketdata-db
+spec:
+  instances: 3
+  # 17 for failover replication slots: without them, Debezium's slot exists only on the primary
+  # and is lost on failover, and every outbox event committed after it is never published.
+  imageName: ghcr.io/cloudnative-pg/postgresql:17
+  # Quorum of one: a commit waits for either standby, so losing one standby does not stop writes.
+  minSyncReplicas: 1
+  maxSyncReplicas: 1
+  primaryUpdateStrategy: unsupervised
+
+  bootstrap:
+    initdb:
+      database: marketdata
+      owner: marketdata      # credentials land in the Secret `marketdata-db-app`
+
+  storage:
+    size: 50Gi
+
+  # One instance per node, so a node failure costs at most one of the three.
+  affinity:
+    enablePodAntiAffinity: true
+    topologyKey: kubernetes.io/hostname
+    podAntiAffinityType: required
+
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      memory: 2Gi
+
+  postgresql:
+    parameters:
+      # A replica is useless for failover if it cannot keep up with the write rate.
+      max_wal_size: 4GB
+      # Required by synchronizeLogicalDecoding on PostgreSQL 17. wal_level is already `logical`,
+      # CloudNativePG's default.
+      hot_standby_feedback: "on"
+      sync_replication_slots: "on"
+      # A stopped Debezium makes the primary keep WAL for its slot. Cap it, so a dead connector
+      # costs a re-seed rather than a full disk and a down database.
+      max_slot_wal_keep_size: 20GB
+
+  # Keeps Debezium's logical slot (created with slot.failover=true) in step on the standbys, so a
+  # promoted standby still has it and CDC resumes where it stopped. Known issue to watch: after a
+  # *switchover*, the demoted primary can keep an orphaned copy of the slot that retains WAL
+  # (cloudnative-pg#9969); alert on replication slot lag, below.
+  replicationSlots:
+    highAvailability:
+      enabled: true
+      synchronizeLogicalDecoding: true
+
+  # Debezium's own login: replication, read-only, nothing else. Its password Secret is created
+  # out of band, never committed:
+  #   kubectl -n marketdata create secret generic marketdata-db-debezium \
+  #     --type=kubernetes.io/basic-auth --from-literal=username=debezium --from-literal=password=<...>
+  managed:
+    roles:
+      - name: debezium
+        ensure: present
+        login: true
+        replication: true
+        inRoles:
+          - pg_read_all_data
+        passwordSecret:
+          name: marketdata-db-debezium
+
+  monitoring:
+    enablePodMonitor: true

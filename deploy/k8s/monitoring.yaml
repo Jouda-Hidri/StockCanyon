@@ -1,0 +1,231 @@
+# Scraping and alerting, for the Prometheus Operator. PostgreSQL itself is scraped by the
+# PodMonitor CloudNativePG creates (monitoring.enablePodMonitor in postgres.yaml).
+#
+# Every box in the design's Monitoring list maps to metrics below:
+#   feed health + reconnects      marketdata_feed_*
+#   gaps + checkpoint lag         marketdata_sequence_*, marketdata_checkpoint_lag_*
+#   queue depth                   marketdata_queue_*
+#   DB throughput/latency/errors  marketdata_db_write_*, hikaricp_*, cnpg_*
+#   outbox -> Kafka -> Redis      marketdata_outbox_published_total, marketdata_projection_*,
+#                                 kafka_consumer_fetch_manager_records_lag_max, cnpg replication slots
+#   API RPS/latency/errors        http_server_requests_seconds_*
+#   CPU/memory                    process_cpu_usage, jvm_memory_*
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: marketdata
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: marketdata
+  podMetricsEndpoints:
+    - port: http
+      path: /actuator/prometheus
+      interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: marketdata
+spec:
+  groups:
+    - name: marketdata.ingestion
+      rules:
+        - alert: MarketDataNoLeader
+          expr: sum(marketdata_leader) == 0
+          for: 1m
+          labels: { severity: critical }
+          annotations:
+            summary: No instance is ingesting the feed.
+            description: Election should hand over within one lock TTL (10s). Check that ingest pods are running and can reach PostgreSQL.
+
+        - alert: MarketDataSplitLeadership
+          expr: sum(marketdata_leader) > 1
+          for: 1m
+          labels: { severity: warning }
+          annotations:
+            summary: More than one instance believes it leads.
+            description: Fencing refuses the stale leader's writes, so data is safe, but it means lock renewals are failing or clocks are skewed beyond the lock TTL.
+
+        - alert: MarketDataSequencesLost
+          expr: increase(marketdata_sequence_lost_total[15m]) > 0
+          labels: { severity: critical }
+          annotations:
+            summary: Messages were written off as lost.
+            description: A sequence hole survived every replay. The stored history has a permanent gap; the exchange no longer has those messages.
+
+        - alert: MarketDataGapOpen
+          expr: max(marketdata_sequence_outstanding) > 0
+          for: 1m
+          labels: { severity: warning }
+          annotations:
+            summary: A sequence hole has stayed open for over a minute.
+            description: Replays should close a hole within seconds. The checkpoint cannot advance past it while it is open.
+
+        - alert: MarketDataCheckpointLag
+          expr: max(marketdata_checkpoint_lag_seconds) > 30
+          for: 2m
+          labels: { severity: warning }
+          annotations:
+            summary: The committed checkpoint is {{ $value | humanizeDuration }} behind real time.
+            description: Writes are slow or failing, or a hole is holding the checkpoint back. An outage longer than the exchange's replay window cannot be recovered.
+
+        - alert: MarketDataFeedDisconnected
+          expr: max(marketdata_feed_connected) == 0 and max(marketdata_queue_paused) == 0
+          for: 2m
+          labels: { severity: critical }
+          annotations:
+            summary: The leader has had no socket to the exchange for two minutes.
+
+        - alert: MarketDataReconnectStorm
+          expr: sum(increase(marketdata_feed_disconnects_total{reason!~"backpressure|gap_backfill"}[10m])) > 10
+          labels: { severity: warning }
+          annotations:
+            summary: The exchange connection dropped {{ $value }} times in 10 minutes.
+
+        - alert: MarketDataExchangeRefused
+          expr: increase(marketdata_feed_exchange_errors_total{code="CHECKPOINT_TOO_OLD"}[5m]) > 0
+          labels: { severity: critical }
+          annotations:
+            summary: The exchange no longer holds the checkpoint's position.
+            description: The outage outlived the replay window. Consumption cannot resume without accepting a gap; this needs a decision, not a retry.
+
+        - alert: MarketDataIngestLagHigh
+          expr: max(marketdata_ingest_lag_seconds{quantile="0.99"}) > 5
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: Quotes arrive {{ $value | humanizeDuration }} after the exchange stamped them.
+
+    - name: marketdata.queue
+      rules:
+        - alert: MarketDataBackpressure
+          expr: max(marketdata_queue_paused) == 1
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: The ingest queue has held the socket closed for five minutes.
+            description: The database is not keeping up with the feed. The exchange is buffering for us; if this outlasts its replay window, data is lost.
+
+        - alert: MarketDataQueueFilling
+          expr: max(marketdata_queue_depth / marketdata_queue_high_watermark) > 0.5
+          for: 5m
+          labels: { severity: info }
+          annotations:
+            summary: The ingest queue is persistently over half way to its high watermark.
+
+    - name: marketdata.database
+      rules:
+        - alert: MarketDataWritesFailing
+          expr: max(marketdata_db_write_consecutive_failures) > 0
+          for: 1m
+          labels: { severity: critical }
+          annotations:
+            summary: Batch writes have been failing for a minute and are being retried.
+
+        - alert: MarketDataWriteLatencyHigh
+          expr: max(marketdata_db_write_seconds{outcome="success",quantile="0.99"}) > 1
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: p99 batch commit time is {{ $value | humanizeDuration }}.
+
+        - alert: MarketDataPoolExhausted
+          expr: max by (pod) (hikaricp_connections_pending) > 0
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: Requests are queueing for database connections on {{ $labels.pod }}.
+
+        - alert: MarketDataReplicationLag
+          expr: max(cnpg_pg_replication_lag) > 10
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: A PostgreSQL standby is {{ $value }}s behind the primary.
+
+    - name: marketdata.pipeline
+      rules:
+        - alert: MarketDataPipelineStalled
+          expr: |
+            sum(rate(marketdata_outbox_published_total[5m])) > 0
+              and sum(rate(marketdata_projection_events_total[5m])) == 0
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: The ingestion service is publishing, and nothing is reaching the distribution service.
+            description: Check the Debezium connector (KafkaConnector marketdata-outbox status), Kafka, and the distribution consumers. Prices served by the API are frozen meanwhile.
+
+        - alert: MarketDataApiServingStalePrices
+          expr: max(marketdata_projection_staleness_seconds{quantile="0.99"}) > 2
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: Quotes reach the API {{ $value | humanizeDuration }} after the exchange stamped them.
+
+        - alert: MarketDataProjectionConsumerLag
+          expr: max(kafka_consumer_fetch_manager_records_lag_max{client_id=~"latest-quote-projector.*"}) > 10000
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: The distribution service is {{ $value }} events behind the latest-quote topic.
+
+        - alert: MarketDataRedisLostWrites
+          expr: increase(marketdata_projection_rewinds_total[10m]) > 0
+          labels: { severity: warning }
+          annotations:
+            summary: Redis lost acknowledged writes (failover or wipe); partitions are being replayed.
+            description: Prices recover on their own as the replay catches up. Repeated occurrences mean Redis is failing over or restarting without its data.
+
+        - alert: MarketDataUnreadableEvents
+          expr: increase(marketdata_projection_events_total{outcome="invalid"}[10m]) > 0
+          labels: { severity: critical }
+          annotations:
+            summary: The distribution service skipped events it could not parse.
+            description: The producer and consumer disagree on the event format. Those instruments' prices are stale until they next move.
+
+        - alert: MarketDataCdcSlotLagging
+          expr: max(cnpg_pg_replication_slots_pg_wal_lsn_diff{slot_name="marketdata_outbox"}) > 5e9
+          for: 10m
+          labels: { severity: critical }
+          annotations:
+            summary: The primary is holding {{ $value | humanize1024 }}B of WAL for Debezium.
+            description: The connector is down or far behind. At max_slot_wal_keep_size (20GB) the slot is invalidated and a re-seed (POST /actuator/outboxreseed on the ingestion leader) is needed.
+
+    - name: marketdata.api
+      rules:
+        - alert: MarketDataApiErrors
+          expr: |
+            sum(rate(http_server_requests_seconds_count{uri=~"/api/.*",status=~"5.."}[5m]))
+              / sum(rate(http_server_requests_seconds_count{uri=~"/api/.*"}[5m])) > 0.01
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: Over 1% of API requests are failing.
+
+        - alert: MarketDataApiLatency
+          expr: |
+            histogram_quantile(0.99, sum by (le) (
+              rate(http_server_requests_seconds_bucket{uri="/api/v1/marketdata/quotes/{isin}/latest"}[5m]))) > 0.1
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: p99 latest-quote latency is {{ $value | humanizeDuration }}.
+
+    - name: marketdata.resources
+      rules:
+        - alert: MarketDataHeapPressure
+          expr: |
+            max by (pod) (sum by (pod) (jvm_memory_used_bytes{area="heap"})
+              / sum by (pod) (jvm_memory_max_bytes{area="heap"})) > 0.9
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "{{ $labels.pod }} heap is over 90% used."
+
+        - alert: MarketDataCpuSaturated
+          expr: max by (pod) (process_cpu_usage) > 0.9
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "{{ $labels.pod }} is using over 90% CPU."

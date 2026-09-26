@@ -1,0 +1,27 @@
+# The market data service on Kubernetes.
+#
+#   Prerequisites, installed once per cluster:
+#     - CloudNativePG operator  1.27+  https://cloudnative-pg.io            (ingestion PostgreSQL)
+#     - Strimzi operator        1.2    https://strimzi.io                   (Kafka, Connect, Debezium)
+#     - OpsTree redis-operator  0.26   https://redis-operator.opstree.dev   (distribution Redis)
+#     - Prometheus Operator         (for the PodMonitor and PrometheusRule; optional)
+#
+#   kubectl apply -k deploy/k8s
+#
+# Point `images` at wherever the Dockerfile's image is pushed.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: marketdata
+resources:
+  - namespace.yaml
+  - postgres.yaml
+  - exchange.yaml
+  - ingest.yaml
+  - kafka.yaml
+  - redis.yaml
+  - distribution.yaml
+  - monitoring.yaml
+images:
+  - name: stockcanyon
+    newName: ghcr.io/your-org/stockcanyon
+    newTag: latest

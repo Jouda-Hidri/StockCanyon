@@ -1,0 +1,94 @@
+# The ingestion service: two replicas, one active. Both stand for election on a lock row in
+# PostgreSQL; the holder consumes the feed, the other waits and takes over within one lock TTL
+# (10s) of the holder's death. Scaling this Deployment adds standbys, not throughput — there is one
+# feed. Its only output is the outbox; it serves no quotes.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: marketdata-ingest
+  labels:
+    app.kubernetes.io/name: marketdata
+    app.kubernetes.io/component: ingest
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: marketdata
+      app.kubernetes.io/component: ingest
+  # Replace one pod at a time, and the new one must be up before the old one goes: a rollout then
+  # hands leadership over instead of leaving nobody standing.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: marketdata
+        app.kubernetes.io/component: ingest
+    spec:
+      automountServiceAccountToken: false
+      # Shutdown drains the queue (up to 10s) before releasing the lock.
+      terminationGracePeriodSeconds: 30
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: marketdata
+                  app.kubernetes.io/component: ingest
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: marketdata
+          image: stockcanyon
+          env:
+            - name: SERVER_PORT
+              value: "8099"
+            - name: MARKETDATA_CONSUMPTION_ENABLED
+              value: "true"
+            - name: MARKETDATA_DISTRIBUTION_ENABLED
+              value: "false"
+            - name: MARKETDATA_EXCHANGE_URL
+              value: ws://exchange:8099/exchange/quotes
+            # socketTimeout: a statement stuck on a partitioned primary fails after 30s instead of
+            # hanging on TCP; the retry then reaches whichever primary the Service points at now.
+            - name: MARKETDATA_DB_URL
+              value: jdbc:postgresql://marketdata-db-rw:5432/marketdata?tcpKeepAlive=true&socketTimeout=30&connectTimeout=5
+            - name: MARKETDATA_DB_USER
+              valueFrom:
+                secretKeyRef: { name: marketdata-db-app, key: username }
+            - name: MARKETDATA_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: marketdata-db-app, key: password }
+          ports:
+            - name: http
+              containerPort: 8099
+          # Liveness and readiness deliberately exclude ingestion health: restarting the leader
+          # because the exchange or the database is down would not bring either back.
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: http }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: "1", memory: 1Gi }
+            limits: { memory: 1Gi }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: marketdata-ingest
+spec:
+  # A node drain may take the leader or the standby, never both.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: marketdata
+      app.kubernetes.io/component: ingest

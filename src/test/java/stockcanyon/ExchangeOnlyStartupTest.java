@@ -22,7 +22,10 @@ import stockcanyon.simulator.SimulatedExchangeHandler;
  */
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-        properties = {"marketdata.enabled=false", "marketdata.simulator.enabled=true"})
+        properties = {
+                "marketdata.consumption.enabled=false",
+                "marketdata.distribution.enabled=false",
+                "marketdata.simulator.enabled=true"})
 class ExchangeOnlyStartupTest {
 
     @Autowired
@@ -32,7 +35,7 @@ class ExchangeOnlyStartupTest {
     SimulatedExchangeHandler exchange;
 
     @Test
-    @DisplayName("the exchange starts with the service disabled and no database")
+    @DisplayName("the exchange starts with both services disabled and no database")
     void startsWithoutTheService() {
         assertThat(exchange).isNotNull();
         assertThat(context.getBeanNamesForType(QuoteConsumer.class))

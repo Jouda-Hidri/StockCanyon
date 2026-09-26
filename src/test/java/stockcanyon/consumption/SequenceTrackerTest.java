@@ -2,9 +2,9 @@ package stockcanyon.consumption;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import org.junit.jupiter.api.DisplayName;
 import java.time.Instant;
 
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import stockcanyon.consumption.SequenceTracker.Verdict;
@@ -19,6 +19,7 @@ class SequenceTrackerTest {
         assertThat(tracker.observe(11, at(11)).verdict()).isEqualTo(Verdict.IN_ORDER);
         assertThat(tracker.observe(12, at(12)).verdict()).isEqualTo(Verdict.IN_ORDER);
         assertThat(tracker.safePosition().sequence()).isEqualTo(12);
+        assertThat(tracker.oldestHole()).isEmpty();
     }
 
     @Test
@@ -32,6 +33,7 @@ class SequenceTrackerTest {
         assertThat(observation.missingFrom()).isEqualTo(11);
         assertThat(observation.missingTo()).isEqualTo(14);
         assertThat(observation.missingCount()).isEqualTo(4);
+        assertThat(tracker.oldestHole()).contains(new SequenceTracker.Hole(11, 14));
     }
 
     /** Replay re-delivers stored messages; those are not gaps. */
@@ -48,7 +50,53 @@ class SequenceTrackerTest {
         assertThat(tracker.observe(13, at(13)).verdict()).isEqualTo(Verdict.IN_ORDER);
     }
 
-    /** A partial fill is still a hole: the safe position may not step over 11. */
+    /**
+     * 40, 41, 44, then 43 late. 43 is a backfill, not a second gap: counting it as one would report
+     * three missing where only 42 is.
+     */
+    @Test
+    @DisplayName("40, 41, 44, 43: one hole, shrinking from two missing to one, closed by the replay")
+    void lateArrivalShrinksTheHole() {
+        SequenceTracker tracker = new SequenceTracker();
+        tracker.observe(40, at(40));
+        tracker.observe(41, at(41));
+
+        SequenceTracker.Observation gap = tracker.observe(44, at(44));
+        assertThat(gap.verdict()).isEqualTo(Verdict.GAP);
+        assertThat(gap.missingCount()).isEqualTo(2);
+        assertThat(tracker.outstanding()).isEqualTo(2);
+        assertThat(tracker.safePosition().sequence()).isEqualTo(41);
+
+        assertThat(tracker.observe(43, at(43)).verdict()).isEqualTo(Verdict.BACKFILL);
+        assertThat(tracker.outstanding()).as("only 42 is still missing").isEqualTo(1);
+        assertThat(tracker.oldestHole()).contains(new SequenceTracker.Hole(42, 42));
+        assertThat(tracker.safePosition().sequence())
+                .as("resuming past 42 would make it permanent")
+                .isEqualTo(41);
+
+        // The forced replay from 41 re-delivers 41..44; 42 closes the hole.
+        assertThat(tracker.observe(41, at(41)).verdict()).isEqualTo(Verdict.DUPLICATE);
+        assertThat(tracker.observe(42, at(42)).verdict()).isEqualTo(Verdict.BACKFILL);
+        assertThat(tracker.observe(43, at(43)).verdict()).isEqualTo(Verdict.DUPLICATE);
+        assertThat(tracker.observe(44, at(44)).verdict()).isEqualTo(Verdict.DUPLICATE);
+
+        assertThat(tracker.safePosition().sequence()).isEqualTo(44);
+        assertThat(tracker.outstanding()).isZero();
+        assertThat(tracker.oldestHole()).isEmpty();
+        assertThat(tracker.writtenOff()).isZero();
+    }
+
+    @Test
+    @DisplayName("new messages above an open hole are in order, not further gaps")
+    void inOrderAboveAnOpenHole() {
+        SequenceTracker tracker = new SequenceTracker();
+        tracker.observe(40, at(40));
+        tracker.observe(42, at(42));
+
+        assertThat(tracker.observe(43, at(43)).verdict()).isEqualTo(Verdict.IN_ORDER);
+        assertThat(tracker.outstanding()).isEqualTo(1);
+    }
+
     @Test
     @DisplayName("filling part of a gap does not advance the safe position past it")
     void partialFillDoesNotAdvance() {
@@ -61,21 +109,7 @@ class SequenceTrackerTest {
                 .as("11 is still missing, so 10 is the last safe position")
                 .isEqualTo(10);
         assertThat(tracker.pendingAhead()).isEqualTo(2);
-    }
-
-
-    @Test
-    @DisplayName("the safe position is the contiguous prefix, not the newest sequence")
-    void safePositionHoldsAtTheHole() {
-        SequenceTracker tracker = new SequenceTracker();
-        tracker.observe(40, at(40));
-        tracker.observe(41, at(41));
-        tracker.observe(43, at(43));   // 42 is missing
-
-        assertThat(tracker.safePosition().sequence())
-                .as("resuming from 43 would make the hole at 42 permanent")
-                .isEqualTo(41);
-        assertThat(tracker.pendingAhead()).isEqualTo(1);
+        assertThat(tracker.outstanding()).isEqualTo(8);
     }
 
     @Test
@@ -87,7 +121,6 @@ class SequenceTrackerTest {
         tracker.observe(44, at(44));
         assertThat(tracker.safePosition().sequence()).isEqualTo(40);
 
-        // replay delivers the missing 41 and 42
         tracker.observe(41, at(41));
         assertThat(tracker.safePosition().sequence()).isEqualTo(41);
         tracker.observe(42, at(42));
@@ -107,6 +140,67 @@ class SequenceTrackerTest {
         tracker.observe(43, at(43));
 
         assertThat(tracker.safePosition().eventTime()).isEqualTo(at(41));
+    }
+
+    @Test
+    @DisplayName("writing off a hole moves the prefix to the next message received, and counts the loss")
+    void writeOff() {
+        SequenceTracker tracker = new SequenceTracker();
+        tracker.observe(40, at(40));
+        tracker.observe(41, at(41));
+        tracker.observe(44, at(44));
+        tracker.observe(45, at(45));
+
+        assertThat(tracker.writeOffOldestHole()).isEqualTo(2);
+        assertThat(tracker.safePosition().sequence()).isEqualTo(45);
+        assertThat(tracker.writtenOff()).isEqualTo(2);
+        assertThat(tracker.outstanding()).isZero();
+        assertThat(tracker.oldestHole()).isEmpty();
+    }
+
+    /** Seeded from the checkpoint, a hole that opened across a restart is still a hole. */
+    @Test
+    @DisplayName("a tracker seeded from the checkpoint detects a gap at the first message")
+    void seededFromCheckpoint() {
+        SequenceTracker tracker = new SequenceTracker(41, at(41));
+
+        assertThat(tracker.observe(41, at(41)).verdict()).isEqualTo(Verdict.DUPLICATE);
+        SequenceTracker.Observation observation = tracker.observe(45, at(45));
+        assertThat(observation.verdict()).isEqualTo(Verdict.GAP);
+        assertThat(observation.missingFrom()).isEqualTo(42);
+        assertThat(tracker.safePosition().sequence()).isEqualTo(41);
+    }
+
+    @Test
+    @DisplayName("a counter that restarts while time moves on is a reset, not endless duplicates")
+    void sequenceReset() {
+        SequenceTracker tracker = new SequenceTracker(5_000, at(5_000));
+
+        assertThat(tracker.observe(0, at(9_000)).verdict()).isEqualTo(Verdict.RESET);
+        assertThat(tracker.observe(1, at(9_001)).verdict()).isEqualTo(Verdict.IN_ORDER);
+        assertThat(tracker.safePosition().sequence()).isEqualTo(1);
+    }
+
+    /** The checkpoint is stored at microseconds; the replayed message it names may carry nanoseconds. */
+    @Test
+    @DisplayName("the replayed checkpoint message is a duplicate, not a reset, despite sub-µs precision")
+    void checkpointPrecisionIsNotAReset() {
+        Instant exact = Instant.parse("2026-09-25T10:00:00.123456789Z");
+        SequenceTracker tracker = new SequenceTracker(41, Instant.parse("2026-09-25T10:00:00.123456Z"));
+
+        assertThat(tracker.observe(41, exact).verdict()).isEqualTo(Verdict.DUPLICATE);
+        assertThat(tracker.writtenOff()).isZero();
+    }
+
+    @Test
+    @DisplayName("a reset while a hole is open writes the hole off, and says so")
+    void resetWritesOffOpenHole() {
+        SequenceTracker tracker = new SequenceTracker();
+        tracker.observe(40, at(40));
+        tracker.observe(43, at(43));   // 41, 42 missing
+
+        assertThat(tracker.observe(0, at(9_000)).verdict()).isEqualTo(Verdict.RESET);
+        assertThat(tracker.writtenOff()).isEqualTo(2);
     }
 
     private static Instant at(long sequence) {

@@ -43,7 +43,10 @@ class MarketDataRecoveryTest {
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
         registry.add("server.port", () -> PORT);
-        registry.add("marketdata.enabled", () -> true);
+        registry.add("marketdata.consumption.enabled", () -> true);
+        registry.add("marketdata.distribution.enabled", () -> false);
+        // Ingestion alone: no Debezium, so no replication slot to wait for.
+        registry.add("marketdata.consumption.require-cdc-slot", () -> false);
         registry.add("marketdata.exchange-url", () -> "ws://localhost:" + PORT + "/exchange/quotes");
 
         registry.add("marketdata.simulator.enabled", () -> true);
@@ -55,8 +58,8 @@ class MarketDataRecoveryTest {
 
         // Flush often, so the test does not spend most of its time waiting for a batch to fill.
         registry.add("marketdata.consumption.flush-interval", () -> "50ms");
-        // Reconnect promptly; the default is a second.
-        registry.add("marketdata.consumption.reconnect-delay", () -> "50ms");
+        // Reconnect promptly; the default backoff starts at half a second.
+        registry.add("marketdata.consumption.reconnect-initial-delay", () -> "50ms");
     }
 
     @Autowired
@@ -120,35 +123,6 @@ class MarketDataRecoveryTest {
                 .isPositive();
     }
 
-    @Test
-    @DisplayName("the latest quote never moves backwards, even while replaying")
-    void latestQuoteIsMonotonic() {
-        await("quotes for several instruments")
-                .atMost(Duration.ofSeconds(30))
-                .pollInterval(Duration.ofMillis(100))
-                .until(() -> countInstruments() >= 3);
-
-        Map<String, Long> before = latestSequencesByIsin();
-
-        exchange.disconnectAll();
-
-        await("the feed to recover")
-                .atMost(Duration.ofSeconds(30))
-                .pollInterval(Duration.ofMillis(100))
-                .until(() -> consumer.status().quotesConsumed() > 2_000);
-
-        Map<String, Long> after = latestSequencesByIsin();
-
-        // Every instrument that had a top of book must still have one, no older than before. The
-        // guard in the upsert is what enforces this; without it the replayed quotes would arrive
-        // after the newer ones and the last write would win.
-        before.forEach((isin, sequenceBefore) ->
-                assertThat(after.get(isin))
-                        .as("latest_quote for %s must not regress", isin)
-                        .isNotNull()
-                        .isGreaterThanOrEqualTo(sequenceBefore));
-    }
-
     /**
      * The uneven arrival rate the requirements call out, measured rather than assumed.
      *
@@ -165,7 +139,7 @@ class MarketDataRecoveryTest {
                 .until(() -> consumer.status().quotesConsumed() > 3_000);
 
         List<Long> counts = marketDataJdbcTemplate.getJdbcTemplate().queryForList(
-                "SELECT count(*) AS c FROM quote GROUP BY isin ORDER BY c DESC", Long.class);
+                "SELECT count(*) AS c FROM quote_history GROUP BY isin ORDER BY c DESC", Long.class);
 
         assertThat(counts).hasSizeGreaterThan(1);
         assertThat(counts.getFirst())
@@ -173,12 +147,28 @@ class MarketDataRecoveryTest {
                 .isGreaterThan(counts.getLast() * 5);
     }
 
-    private long countStored() {
-        return queryLong("SELECT count(*) FROM quote");
+    @Autowired
+    org.springframework.boot.test.web.client.TestRestTemplate http;
+
+    @Test
+    @DisplayName("the consumption service reports its state, including whether anything was missed")
+    @SuppressWarnings("unchecked")
+    void statusReportsConsumption() {
+        await("the feed to deliver quotes")
+                .atMost(Duration.ofSeconds(30))
+                .until(() -> consumer.status().quotesConsumed() > 500);
+
+        Map<String, Object> body = http.getForObject(
+                "http://localhost:" + PORT + "/api/v1/marketdata/status", Map.class);
+
+        Map<String, Object> feed = (Map<String, Object>) body.get("feed");
+        assertThat(feed.get("leader")).isEqualTo(true);
+        assertThat(feed.get("connected")).isEqualTo(true);
+        assertThat(((Number) feed.get("quotesMissing")).longValue()).isZero();
     }
 
-    private long countInstruments() {
-        return queryLong("SELECT count(*) FROM latest_quote");
+    private long countStored() {
+        return queryLong("SELECT count(*) FROM quote_history");
     }
 
     /**
@@ -187,7 +177,7 @@ class MarketDataRecoveryTest {
      */
     private boolean storedSequencesAreContiguous() {
         Boolean contiguous = marketDataJdbcTemplate.getJdbcTemplate().queryForObject(
-                "SELECT count(DISTINCT sequence) = (max(sequence) - min(sequence) + 1) FROM quote",
+                "SELECT count(DISTINCT sequence) = (max(sequence) - min(sequence) + 1) FROM quote_history",
                 Boolean.class);
         return Boolean.TRUE.equals(contiguous);
     }
@@ -195,20 +185,8 @@ class MarketDataRecoveryTest {
     private String sequenceSpan() {
         return marketDataJdbcTemplate.getJdbcTemplate().queryForObject(
                 "SELECT 'min=' || min(sequence) || ' max=' || max(sequence) "
-                        + "|| ' distinct=' || count(DISTINCT sequence) FROM quote",
+                        + "|| ' distinct=' || count(DISTINCT sequence) FROM quote_history",
                 String.class);
-    }
-
-    private Map<String, Long> latestSequencesByIsin() {
-        return marketDataJdbcTemplate.getJdbcTemplate().query(
-                "SELECT isin, sequence FROM latest_quote",
-                rs -> {
-                    Map<String, Long> out = new java.util.HashMap<>();
-                    while (rs.next()) {
-                        out.put(rs.getString("isin"), rs.getLong("sequence"));
-                    }
-                    return out;
-                });
     }
 
     private long queryLong(String sql) {
