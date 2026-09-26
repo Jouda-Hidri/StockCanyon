@@ -24,6 +24,7 @@ spec:
         app.kubernetes.io/component: distribution
     spec:
       automountServiceAccountToken: false
+      # preStop 5s + graceful HTTP shutdown (≤20s, spring.lifecycle.timeout-per-shutdown-phase) < 30s.
       terminationGracePeriodSeconds: 30
       topologySpreadConstraints:
         - maxSkew: 1

@@ -4,6 +4,7 @@ import java.net.InetAddress;
 import java.net.URI;
 import java.net.UnknownHostException;
 import java.time.Clock;
+import java.time.Duration;
 import java.util.UUID;
 
 import javax.sql.DataSource;
@@ -57,6 +58,10 @@ public class ConsumptionConfig {
         config.setPassword(properties.database().password());
         config.setMaximumPoolSize(POOL_SIZE);
         config.setPoolName("marketdata");
+        // Wait for the database at start-up instead of failing at once. Deployed together, the pod
+        // is usually up before PostgreSQL accepts connections; failing fast turned that into a crash
+        // loop of restarts. Still bounded, so a database that never comes is reported, not hidden.
+        config.setInitializationFailTimeout(Duration.ofMinutes(3).toMillis());
         // Set before the pool starts: Hikari cannot attach metrics to a pool already running.
         // Gives hikaricp_connections_{active,pending,timeout} and acquisition/usage timings.
         config.setMetricsTrackerFactory(new MicrometerMetricsTrackerFactory(meters));

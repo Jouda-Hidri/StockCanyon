@@ -51,8 +51,13 @@ Includes an end-to-end test through real PostgreSQL, Debezium, Kafka and Redis.
 
 ## Deploy
 
-`kubectl apply -k deploy/k8s` — needs the CloudNativePG (1.27+), Strimzi (1.2) and OpsTree
-redis-operator (0.26) operators; Prometheus Operator optional.
+`kubectl apply -k deploy/k8s/base` — needs the CloudNativePG (1.27+), Strimzi (1.2) and OpsTree
+redis-operator (0.26) operators; kube-prometheus-stack optional (Prometheus, alerts, and the
+Grafana dashboard in `deploy/k8s/base/grafana/`).
+
+Locally, on a dedicated minikube profile with no registry: `deploy/k8s/overlays/minikube/up.sh`
+installs the operators, builds both images inside minikube, and deploys single-instance versions
+of everything plus Prometheus and Grafana (about 6 GiB).
 
 | Piece | Shape |
 | --- | --- |

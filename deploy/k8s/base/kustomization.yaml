@@ -4,9 +4,11 @@
 #     - CloudNativePG operator  1.27+  https://cloudnative-pg.io            (ingestion PostgreSQL)
 #     - Strimzi operator        1.2    https://strimzi.io                   (Kafka, Connect, Debezium)
 #     - OpsTree redis-operator  0.26   https://redis-operator.opstree.dev   (distribution Redis)
-#     - Prometheus Operator         (for the PodMonitor and PrometheusRule; optional)
+#     - kube-prometheus-stack (Prometheus Operator + Grafana), optional: scrapes the PodMonitor,
+#       loads the PrometheusRule, and its Grafana sidecar imports the dashboard ConfigMap below
+#       (set grafana.sidecar.dashboards.searchNamespace=ALL, since it lives in `marketdata`)
 #
-#   kubectl apply -k deploy/k8s
+#   kubectl apply -k deploy/k8s/base          (minikube: deploy/k8s/overlays/minikube/up.sh)
 #
 # Point `images` at wherever the Dockerfile's image is pushed.
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -25,3 +27,13 @@ images:
   - name: stockcanyon
     newName: ghcr.io/your-org/stockcanyon
     newTag: latest
+# The Grafana dashboard, generated from grafana/generate-dashboard.py. The label is the one
+# kube-prometheus-stack's Grafana sidecar watches for.
+configMapGenerator:
+  - name: marketdata-grafana-dashboard
+    files:
+      - grafana/marketdata-dashboard.json
+    options:
+      disableNameSuffixHash: true
+      labels:
+        grafana_dashboard: "1"

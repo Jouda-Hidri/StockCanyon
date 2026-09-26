@@ -29,8 +29,11 @@ spec:
         app.kubernetes.io/component: ingest
     spec:
       automountServiceAccountToken: false
-      # Shutdown drains the queue (up to 10s) before releasing the lock.
-      terminationGracePeriodSeconds: 30
+      # SIGTERM: stop the socket (≤5s), drain the queue (≤10s, retrying if the database is down),
+      # release the lock so the standby takes over at once, then the web server. Measured at under a
+      # second when healthy; 45s covers the worst case so the lock is released rather than left to
+      # expire after a SIGKILL.
+      terminationGracePeriodSeconds: 45
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:

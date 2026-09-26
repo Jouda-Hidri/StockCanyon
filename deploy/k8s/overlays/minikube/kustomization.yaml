@@ -1,0 +1,95 @@
+# The whole stack on a single minikube node, without a registry: images are built inside minikube
+# (up.sh). Single instances where production has three, and small resources; the manifests are
+# otherwise the production ones, so this exercises the real wiring, not a stand-in.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: marketdata
+resources:
+  - ../../base
+  - monitoring.yaml
+images:
+  # The base has already rewritten the name to its registry's; point it back at the local build.
+  - name: ghcr.io/your-org/stockcanyon
+    newName: stockcanyon
+    newTag: local
+patches:
+  # Ingestion DB: one instance, so nothing to replicate synchronously or sync slots to.
+  - target: { kind: Cluster, name: marketdata-db }
+    patch: |-
+      apiVersion: postgresql.cnpg.io/v1
+      kind: Cluster
+      metadata: { name: marketdata-db }
+      spec:
+        instances: 1
+        minSyncReplicas: 0
+        maxSyncReplicas: 0
+        storage: { size: 2Gi }
+        affinity: { podAntiAffinityType: preferred }
+        resources:
+          requests: { cpu: 100m, memory: 256Mi }
+          limits: { memory: 384Mi }
+        postgresql:
+          parameters:
+            max_wal_size: 1GB
+            max_slot_wal_keep_size: 2GB
+        replicationSlots:
+          highAvailability:
+            synchronizeLogicalDecoding: false
+  # Kafka: one broker, replication factor 1.
+  - target: { kind: KafkaNodePool, name: marketdata-kafka }
+    patch: |-
+      - { op: replace, path: /spec/replicas, value: 1 }
+      - { op: replace, path: /spec/storage/volumes/0/size, value: 5Gi }
+      - { op: add, path: /spec/resources, value: { requests: { cpu: 200m, memory: 768Mi }, limits: { memory: 768Mi } } }
+      - { op: add, path: /spec/jvmOptions, value: { "-Xms": 384m, "-Xmx": 384m } }
+  - target: { kind: Kafka, name: marketdata-kafka }
+    patch: |-
+      - { op: replace, path: /spec/kafka/config/offsets.topic.replication.factor, value: 1 }
+      - { op: replace, path: /spec/kafka/config/transaction.state.log.replication.factor, value: 1 }
+      - { op: replace, path: /spec/kafka/config/transaction.state.log.min.isr, value: 1 }
+      - { op: replace, path: /spec/kafka/config/default.replication.factor, value: 1 }
+      - { op: replace, path: /spec/kafka/config/min.insync.replicas, value: 1 }
+      - { op: remove, path: /spec/entityOperator/userOperator }
+  - target: { kind: KafkaTopic, name: marketdata.latest-quote }
+    patch: |-
+      - { op: replace, path: /spec/partitions, value: 3 }
+      - { op: replace, path: /spec/replicas, value: 1 }
+      - { op: replace, path: /spec/config/min.insync.replicas, value: 1 }
+  - target: { kind: KafkaTopic, name: debezium-heartbeat }
+    patch: |-
+      - { op: replace, path: /spec/replicas, value: 1 }
+  # Connect: the locally built image instead of Strimzi's build, which must push to a registry.
+  - target: { kind: KafkaConnect, name: marketdata-connect }
+    patch: |-
+      - { op: remove, path: /spec/build }
+      - { op: add, path: /spec/image, value: "marketdata-connect:local" }
+      - { op: replace, path: /spec/replicas, value: 1 }
+      - { op: add, path: /spec/resources, value: { requests: { cpu: 100m, memory: 640Mi }, limits: { memory: 640Mi } } }
+      - { op: add, path: /spec/jvmOptions, value: { "-Xms": 256m, "-Xmx": 384m } }
+  # Redis: two nodes; the Sentinels stay, they are what the client connects through.
+  - target: { kind: RedisReplication, name: marketdata-redis }
+    patch: |-
+      - { op: replace, path: /spec/clusterSize, value: 2 }
+      - { op: replace, path: /spec/kubernetesConfig/resources, value: { requests: { cpu: 50m, memory: 96Mi }, limits: { memory: 128Mi } } }
+      - { op: replace, path: /spec/redisExporter/enabled, value: false }
+      - { op: replace, path: /spec/storage/volumeClaimTemplate/spec/resources/requests/storage, value: 1Gi }
+  - target: { kind: RedisSentinel, name: marketdata-redis }
+    patch: |-
+      - { op: replace, path: /spec/pdb/minAvailable, value: 1 }
+      - { op: replace, path: /spec/kubernetesConfig/resources, value: { requests: { cpu: 25m, memory: 48Mi }, limits: { memory: 64Mi } } }
+  # The services: two ingestion pods (to see the election), one distribution pod.
+  - target: { kind: Deployment, name: marketdata-ingest }
+    patch: |-
+      - { op: replace, path: /spec/template/spec/containers/0/resources, value: { requests: { cpu: 200m, memory: 448Mi }, limits: { memory: 448Mi } } }
+      - { op: remove, path: /spec/template/spec/affinity }
+  - target: { kind: Deployment, name: marketdata-distribution }
+    patch: |-
+      - { op: replace, path: /spec/replicas, value: 1 }
+      - { op: replace, path: /spec/template/spec/containers/0/resources, value: { requests: { cpu: 200m, memory: 448Mi }, limits: { memory: 448Mi } } }
+  - target: { kind: HorizontalPodAutoscaler, name: marketdata-distribution }
+    patch: |-
+      - { op: replace, path: /spec/minReplicas, value: 1 }
+      - { op: replace, path: /spec/maxReplicas, value: 2 }
+  - target: { kind: Deployment, name: exchange }
+    patch: |-
+      - { op: replace, path: /spec/template/spec/containers/0/resources, value: { requests: { cpu: 100m, memory: 384Mi }, limits: { memory: 384Mi } } }
