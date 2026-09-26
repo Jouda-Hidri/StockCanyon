@@ -141,6 +141,8 @@ services:
   # own status.
   ingestion:
     build: .
+    # Time for SIGTERM to drain and release the lock; Compose's default 10s would kill it mid-drain.
+    stop_grace_period: 45s
     depends_on:
       postgres:
         condition: service_healthy
@@ -161,6 +163,8 @@ services:
   # The distribution service: projects the topic into Redis and serves the API. No database.
   distribution:
     build: .
+    # Time for in-flight requests to finish (≤20s); Compose's default 10s would cut them off.
+    stop_grace_period: 30s
     depends_on:
       kafka:
         condition: service_healthy

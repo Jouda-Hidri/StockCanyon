@@ -64,6 +64,22 @@ spec:
     cleanup.policy: compact
     min.insync.replicas: 2
 ---
+# Debezium's heartbeat topic (heartbeat.interval.ms in the connector). Declared like every other
+# topic: with auto-creation off, a missing heartbeat topic blocks the connector's producer, and the
+# outbox events queued behind it stop reaching Kafka. Found on the first minikube deploy.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: debezium-heartbeat
+  labels:
+    strimzi.io/cluster: marketdata-kafka
+spec:
+  topicName: __debezium-heartbeat.marketdata
+  partitions: 1
+  replicas: 3
+  config:
+    retention.ms: 3600000
+---
 apiVersion: kafka.strimzi.io/v1
 kind: KafkaConnect
 metadata:
